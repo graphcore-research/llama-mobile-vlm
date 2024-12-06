@@ -11,8 +11,19 @@ from torch import Tensor
 
 
 @dataclass
+class VisionConfig:
+    hidden_size: int
+    layers: int
+    layers_2: int
+    heads: int
+    head_size: int
+    mlp_size: int
+    taps: list[int]
+
+
+@dataclass
 class Config:
-    hidden_size_vision: int
+    vision: VisionConfig
     patch_size: int
     image_size: int
     max_tiles: int
@@ -36,11 +47,35 @@ class LayerNormParams:
 
 
 @dataclass
+class VisionLayerParams:
+    attn_norm: LayerNormParams  # (h)
+    attn_q: Tensor  # (heads * head_size, h)
+    attn_k: Tensor  # (heads * head_size, h)
+    attn_v: Tensor  # (heads * head_size, h)
+    attn_o: Tensor  # (h, heads * head_size)
+
+    mlp_norm: LayerNormParams  # (h)
+    mlp_up: Tensor  # (mlp_size, h)
+    mlp_up_bias: Tensor  # (mlp_size)
+    mlp_down: Tensor  # (h, mlp_size)
+    mlp_down_bias: Tensor  # (h)
+
+
+@dataclass
+class VisionParams:
+    patch_embedding: Tensor  # (h, 3, patch_size, patch_size)
+    positional_embedding: Tensor  # (n_aspect, max_tiles, n_patches, h)
+    class_embedding: Tensor  # (n_aspect, max_tiles, h)
+    pre_norm: LayerNormParams  # (h)
+    layers: list[VisionLayerParams]  # (h)
+    post_norm: LayerNormParams  # (h)
+    post_tile_embedding: Tensor  # (n_aspect, max_tiles, h)
+    layers_2: list[VisionLayerParams]  # (h)
+
+
+@dataclass
 class Params:
-    patch_embedding: Tensor  # (h_vision, 3, patch_size, patch_size)
-    vision_positional_embedding: Tensor  # (n_aspect, max_tiles, n_patches, h_vision)
-    vision_class_embedding: Tensor  # (n_aspect, max_tiles, h_vision)
-    vision_pre_norm: LayerNormParams  # (h_vision)
+    vision: VisionParams  # (h_vision)
 
 
 @dataclass
@@ -55,8 +90,18 @@ class Inputs:
 def config_from_huggingface(
     config: transformers.PretrainedConfig, processor: transformers.BaseImageProcessor
 ) -> Config:
+    assert config.vision_config.hidden_act == "gelu"
     return Config(
-        hidden_size_vision=config.vision_config.hidden_size,
+        vision=VisionConfig(
+            hidden_size=config.vision_config.hidden_size,
+            layers=config.vision_config.num_hidden_layers,
+            layers_2=config.vision_config.num_global_layers,
+            heads=config.vision_config.attention_heads,
+            head_size=config.vision_config.hidden_size
+            // config.vision_config.attention_heads,
+            mlp_size=config.vision_config.intermediate_size,
+            taps=config.vision_config.intermediate_layers_indices,
+        ),
         patch_size=config.vision_config.patch_size,
         image_size=config.vision_config.image_size,
         max_tiles=config.vision_config.max_num_tiles,
@@ -67,13 +112,18 @@ def config_from_huggingface(
 
 
 def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> Params:
-    p = dict(model.named_parameters())
+    p = {k: v.detach() for k, v in model.named_parameters()}
+
+    def _layer_norm(name: str) -> LayerNormParams:
+        return LayerNormParams(p[f"{name}.weight"], p[f"{name}.bias"])
+
+    # Merge positional embeddings
     g = "vision_model.gated_positional_embedding"
     g_gate = p[f"{g}.gate"].tanh().reshape(())
     gated_embeddings = (
         p[f"{g}.embedding"] * (1 - g_gate)
         + p[f"{g}.tile_embedding.weight"].reshape(
-            c.n_aspect + 1, c.max_tiles, c.n_patches + 1, c.hidden_size_vision
+            c.n_aspect + 1, c.max_tiles, c.n_patches + 1, c.vision.hidden_size
         )[1:]
         * g_gate
     )
@@ -81,7 +131,7 @@ def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> P
     t_gate = p[f"{t}.gate"].tanh()
     vision_positional_embedding = (
         p[f"{t}.embedding.weight"].reshape(
-            c.n_aspect + 1, c.max_tiles, 1, c.hidden_size_vision
+            c.n_aspect + 1, c.max_tiles, 1, c.vision.hidden_size
         )[1:]
         * t_gate
         + gated_embeddings[..., 1:, :]
@@ -89,14 +139,53 @@ def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> P
     vision_class_embedding = (
         p["vision_model.class_embedding"] + gated_embeddings[..., 0, :]
     )
-    vision_pre_norm = LayerNormParams(
-        p["vision_model.layernorm_pre.weight"], p["vision_model.layernorm_pre.bias"]
-    )
+
+    def _vision_layer(name: str) -> VisionLayerParams:
+        layer = VisionLayerParams(
+            attn_norm=_layer_norm(f"{name}.input_layernorm"),
+            attn_q=p[f"{name}.self_attn.q_proj.weight"],
+            attn_k=p[f"{name}.self_attn.k_proj.weight"],
+            attn_v=p[f"{name}.self_attn.v_proj.weight"],
+            attn_o=p[f"{name}.self_attn.o_proj.weight"],
+            mlp_norm=_layer_norm(f"{name}.post_attention_layernorm"),
+            mlp_up=p[f"{name}.mlp.fc1.weight"],
+            mlp_up_bias=p[f"{name}.mlp.fc1.bias"],
+            mlp_down=p[f"{name}.mlp.fc2.weight"],
+            mlp_down_bias=p[f"{name}.mlp.fc2.bias"],
+        )
+        # Merge the gate into the final projection
+        if f"{name}.gate_attn" in p:
+            layer.attn_o = layer.attn_o * p[f"{name}.gate_attn"].tanh()
+            layer.mlp_down = layer.mlp_down * p[f"{name}.gate_ffn"].tanh()
+            layer.mlp_down_bias = layer.mlp_down_bias * p[f"{name}.gate_ffn"].tanh()
+        return layer
+
+    vision_pre_norm = _layer_norm("vision_model.layernorm_pre")
+    layers = [
+        _vision_layer(f"vision_model.transformer.layers.{i}")
+        for i in range(c.vision.layers)
+    ]
+    vision_post_norm = _layer_norm("vision_model.layernorm_post")
+    vision_post_tile_embedding = (
+        p["vision_model.post_tile_positional_embedding.gate"].tanh()
+        * p["vision_model.post_tile_positional_embedding.embedding.weight"]
+    ).view(len(c.aspect_ratios) + 1, c.max_tiles, c.vision.hidden_size)[1:]
+    layers_2 = [
+        _vision_layer(f"vision_model.global_transformer.layers.{i}")
+        for i in range(c.vision.layers_2)
+    ]
+
     return Params(
-        patch_embedding=p["vision_model.patch_embedding.weight"],
-        vision_positional_embedding=vision_positional_embedding,
-        vision_class_embedding=vision_class_embedding,
-        vision_pre_norm=vision_pre_norm,
+        VisionParams(
+            patch_embedding=p["vision_model.patch_embedding.weight"],
+            positional_embedding=vision_positional_embedding,
+            class_embedding=vision_class_embedding,
+            pre_norm=vision_pre_norm,
+            layers=layers,
+            post_norm=vision_post_norm,
+            post_tile_embedding=vision_post_tile_embedding,
+            layers_2=layers_2,
+        )
     )
 
 
@@ -154,3 +243,30 @@ def layer_norm(x: Tensor, p: LayerNormParams) -> Tensor:
     z = x - x.mean(-1, keepdim=True)
     z /= torch.sqrt((z**2).mean(-1, keepdim=True) + NORM_EPS)
     return z * p.weight + p.bias
+
+
+def vision_transformer(
+    config: VisionConfig,
+    layers: list[VisionLayerParams],
+    hidden: Tensor,
+    attn_mask: Tensor,
+) -> list[Tensor]:
+    """The transformer stack."""
+    hiddens = []
+    for layer in layers:
+        hiddens.append(hidden.clone())
+        z = layer_norm(hidden, layer.attn_norm)
+        q, k, v = (
+            (z @ m.T).view(-1, config.heads, config.head_size).transpose(-2, -3)
+            for m in (layer.attn_q, layer.attn_k, layer.attn_v)
+        )
+        # Add dummy batch axis for torch performance
+        mix = F.scaled_dot_product_attention(
+            q[None], k[None], v[None], attn_mask=attn_mask
+        ).squeeze(0)
+        hidden += mix.transpose(-2, -3).flatten(start_dim=-2) @ layer.attn_o.T
+
+        z = layer_norm(hidden, layer.mlp_norm)
+        z = F.gelu(z @ layer.mlp_up.T + layer.mlp_up_bias)
+        hidden += z @ layer.mlp_down.T + layer.mlp_down_bias
+    return hiddens
