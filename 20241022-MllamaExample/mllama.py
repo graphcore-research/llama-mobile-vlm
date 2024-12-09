@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +41,18 @@ class VisionConfig:
 @dataclass
 class TextConfig:
     hidden_size: int
+    layers: int
+    q_heads_per_kv_head: int
+    kv_heads: int
+    head_size: int
+    rope_angular_frequency: list[float]
+    mlp_size: int
+    cross_attention_layers: list[int]
+    vocab_size: int
+
+    @property
+    def q_heads(self) -> int:
+        return self.q_heads_per_kv_head * self.kv_heads
 
 
 @dataclass
@@ -75,23 +88,49 @@ class VisionParams:
     positional_embedding: Tensor  # (n_aspect, max_tiles, n_patches, h)
     class_embedding: Tensor  # (n_aspect, max_tiles, h)
     pre_norm: LayerNormParams  # (h)
-    layers_1: list[VisionLayerParams]  # (h)
+    layers_1: list[VisionLayerParams]  # layers x (h)
     post_norm: LayerNormParams  # (h)
     post_tile_embedding: Tensor  # (n_aspect, max_tiles, h)
-    layers_2: list[VisionLayerParams]  # (h)
+    layers_2: list[VisionLayerParams]  # layers_2 x (h)
+
+
+@dataclass
+class TextLayerParams:
+    attn_norm: Tensor  # (h)
+    attn_q: Tensor  # (q_heads_per_kv_head * kv_heads * head_size, h)
+    attn_k: Tensor  # (kv_heads * head_size, h)
+    attn_v: Tensor  # (kv_heads * head_size, h)
+    attn_o: Tensor  # (h, q_heads_per_kv_head * kv_heads * head_size)
+    attn_q_norm: Optional[Tensor]  # (head_size)
+    attn_k_norm: Optional[Tensor]  # (head_size)
+
+    mlp_norm: Tensor  # (h)
+    mlp_up: Tensor  # (mlp_size, h)
+    mlp_gate: Tensor  # (mlp_size, h)
+    mlp_down: Tensor  # (h, mlp_size)
+
+
+@dataclass
+class TextParams:
+    embedding: Tensor  # (vocab_size+, h)
+    layers: list[TextLayerParams]  # (h)
+    final_norm: Tensor  # (h)
+    unembedding: Tensor  # (vocab_size, h)
 
 
 @dataclass
 class Params:
-    vision: VisionParams  # (h_vision)
+    vision: VisionParams  # (h=h_vision)
     vision_text_projection: Tensor  # (h_text, h_vision)
     vision_text_projection_bias: Tensor  # (h_text)
+    text: TextParams  # (h=h_text)
 
 
 @dataclass
 class Inputs:
     image: Tensor  # (n_tiles, 3, image_size, image_size)
     aspect_ratio_id: Tensor  # ()
+    text: Tensor  # (seq_len; int64)
 
     def to(self, device: torch.device) -> "Inputs":
         return type(self)(**{k: v.to(device) for k, v in self.__dict__.items()})
@@ -100,10 +139,26 @@ class Inputs:
 # Converting the model
 
 
+def _rope_angular_frequency(config: transformers.PretrainedConfig) -> list[float]:
+    head_size = config.hidden_size // config.num_attention_heads
+    freq = config.rope_theta ** -(
+        torch.arange(0, head_size, 2, dtype=torch.float) / head_size
+    )
+    s = config.rope_scaling
+    z = (
+        s["original_max_position_embeddings"] * freq / (2 * torch.pi)
+        - s["low_freq_factor"]
+    ) / (s["high_freq_factor"] - s["low_freq_factor"])
+    freq *= torch.lerp(torch.tensor(1 / s["factor"]), torch.tensor(1.0), z.clip(0, 1))
+    return freq.tolist()
+
+
 def config_from_huggingface(
     config: transformers.PretrainedConfig, processor: transformers.BaseImageProcessor
 ) -> Config:
     assert config.vision_config.hidden_act == "gelu"
+    assert config.text_config.hidden_act == "silu"
+    assert config.text_config.rms_norm_eps == NORM_EPS
     return Config(
         vision=VisionConfig(
             # Inputs
@@ -118,20 +173,36 @@ def config_from_huggingface(
             layers=config.vision_config.num_hidden_layers,
             layers_2=config.vision_config.num_global_layers,
             heads=config.vision_config.attention_heads,
-            head_size=config.vision_config.hidden_size
-            // config.vision_config.attention_heads,
+            head_size=(
+                config.vision_config.hidden_size // config.vision_config.attention_heads
+            ),
             mlp_size=config.vision_config.intermediate_size,
             taps=config.vision_config.intermediate_layers_indices,
         ),
         text=TextConfig(
             hidden_size=config.text_config.hidden_size,
-        )
+            layers=config.text_config.num_hidden_layers,
+            q_heads_per_kv_head=(
+                config.text_config.num_attention_heads
+                // config.text_config.num_key_value_heads
+            ),
+            kv_heads=config.text_config.num_key_value_heads,
+            head_size=(
+                config.text_config.hidden_size // config.text_config.num_attention_heads
+            ),
+            rope_angular_frequency=_rope_angular_frequency(config.text_config),
+            mlp_size=config.text_config.intermediate_size,
+            cross_attention_layers=config.text_config.cross_attention_layers,
+            vocab_size=config.text_config.vocab_size,
+        ),
     )
 
 
 def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> Params:
     cv = c.vision
     p = {k: v.detach() for k, v in model.named_parameters()}
+
+    ## Vision
 
     def _layer_norm(name: str) -> LayerNormParams:
         return LayerNormParams(p[f"{name}.weight"], p[f"{name}.bias"])
@@ -193,8 +264,49 @@ def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> P
         for i in range(cv.layers_2)
     ]
 
+    ## Language
+
+    def _text_layer(n: int) -> TextLayerParams:
+        name = f"language_model.model.layers.{n}"
+        if n in c.text.cross_attention_layers:
+            # Merge the gates into the linear projections
+            return TextLayerParams(
+                attn_norm=p[f"{name}.input_layernorm.weight"],
+                attn_q=p[f"{name}.cross_attn.q_proj.weight"],
+                attn_k=p[f"{name}.cross_attn.k_proj.weight"],
+                attn_v=p[f"{name}.cross_attn.v_proj.weight"],
+                attn_o=(
+                    p[f"{name}.cross_attn.o_proj.weight"]
+                    * p[f"{name}.cross_attn_attn_gate"].tanh()
+                ),
+                attn_q_norm=p[f"{name}.cross_attn.q_norm.weight"],
+                attn_k_norm=p[f"{name}.cross_attn.k_norm.weight"],
+                mlp_norm=p[f"{name}.post_attention_layernorm.weight"],
+                mlp_up=p[f"{name}.mlp.up_proj.weight"],
+                mlp_gate=p[f"{name}.mlp.gate_proj.weight"],
+                mlp_down=(
+                    p[f"{name}.mlp.down_proj.weight"]
+                    * p[f"{name}.cross_attn_mlp_gate"].tanh()
+                ),
+            )
+        return TextLayerParams(
+            attn_norm=p[f"{name}.input_layernorm.weight"],
+            attn_q=p[f"{name}.self_attn.q_proj.weight"],
+            attn_k=p[f"{name}.self_attn.k_proj.weight"],
+            attn_v=p[f"{name}.self_attn.v_proj.weight"],
+            attn_o=p[f"{name}.self_attn.o_proj.weight"],
+            attn_q_norm=None,
+            attn_k_norm=None,
+            mlp_norm=p[f"{name}.post_attention_layernorm.weight"],
+            mlp_up=p[f"{name}.mlp.up_proj.weight"],
+            mlp_gate=p[f"{name}.mlp.gate_proj.weight"],
+            mlp_down=p[f"{name}.mlp.down_proj.weight"],
+        )
+
+    ## Result
+
     return Params(
-        VisionParams(
+        vision=VisionParams(
             patch_embedding=p["vision_model.patch_embedding.weight"],
             positional_embedding=vision_positional_embedding,
             class_embedding=vision_class_embedding,
@@ -206,10 +318,21 @@ def params_from_huggingface(c: Config, model: transformers.PreTrainedModel) -> P
         ),
         vision_text_projection=p["multi_modal_projector.weight"],
         vision_text_projection_bias=p["multi_modal_projector.bias"],
+        text=TextParams(
+            embedding=p["language_model.model.embed_tokens.weight"],
+            layers=[_text_layer(n) for n in range(c.text.layers)],
+            final_norm=p["language_model.model.norm.weight"],
+            unembedding=p["language_model.lm_head.weight"],
+        ),
     )
 
 
-def get_inputs(config: Config, image: Tensor) -> Inputs:
+def get_inputs(
+    config: Config,
+    tokenizer: transformers.PreTrainedTokenizerBase,
+    image: Tensor,
+    text: str,
+) -> Inputs:
     image_size = config.vision.image_size
 
     # Minimum upscaling, otherwise maximum downscaling
@@ -251,7 +374,11 @@ def get_inputs(config: Config, image: Tensor) -> Inputs:
         .flatten(end_dim=1)
     )
 
-    return Inputs(image=image, aspect_ratio_id=torch.tensor(aspect_ratio_id))
+    return Inputs(
+        image=image,
+        aspect_ratio_id=torch.tensor(aspect_ratio_id),
+        text=torch.tensor(tokenizer(text).input_ids),
+    )
 
 
 # Model implementation
@@ -271,7 +398,6 @@ def vision_transformer(
     hidden: Tensor,
     attn_mask: Tensor,
 ) -> list[Tensor]:
-    """The transformer stack."""
     hiddens = [hidden.clone()]
     for layer in layers:
         z = layer_norm(hidden, layer.attn_norm)
@@ -296,7 +422,7 @@ def vision_model(config: VisionConfig, params: VisionParams, inputs: Inputs) -> 
     # Image patching
     patches = (  # (n_tiles, n_patches, hidden_size)
         F.conv2d(
-            inputs.image,
+            inputs.image.to(params.patch_embedding.dtype),
             params.patch_embedding,
             stride=config.patch_size,
         )
@@ -316,7 +442,7 @@ def vision_model(config: VisionConfig, params: VisionParams, inputs: Inputs) -> 
         torch.ones(patches.shape[:-1], dtype=torch.bool, device=patches.device),
         (0, npad),
     ).flatten()
-    mask = (mask[:, None] | mask).float().log()
+    mask = (mask[:, None] | mask).to(patches.dtype).log()
     hidden = F.pad(patches, (0, 0, 0, npad)).flatten(end_dim=-2)
 
     # 'Transformer' stack
@@ -340,3 +466,61 @@ def vision_model(config: VisionConfig, params: VisionParams, inputs: Inputs) -> 
     hidden = hidden.unflatten(0, [config.max_tiles, -1])[:, : patches.shape[-2]]
 
     return hidden
+
+
+def rms_norm(x: Tensor, weight: Tensor) -> Tensor:
+    return weight * x / torch.sqrt((x**2).mean(-1, keepdim=True) + NORM_EPS)
+
+
+def rotate(z: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    zx, zy = z.unflatten(-1, (2, -1)).movedim(-2, 0)
+    return torch.cat([zx * cos - zy * sin, zy * cos + zx * sin], -1)
+
+
+def text_transformer(
+    config: TextConfig,
+    layers: list[TextLayerParams],
+    hidden: Tensor,
+    vision_out: Tensor,
+) -> Tensor:
+    pos_id = torch.arange(hidden.shape[-2], device=hidden.device)
+    rope_angle = pos_id[:, None] * torch.tensor(
+        config.rope_angular_frequency, device=hidden.device
+    )
+    cos, sin = rope_angle.cos().to(hidden.dtype), rope_angle.sin().to(hidden.dtype)
+    for layer_idx, layer in enumerate(layers):
+        cross_attn = layer_idx in config.cross_attention_layers
+        q_input = rms_norm(hidden, layer.attn_norm)
+        kv_input = vision_out if cross_attn else q_input
+        q, k, v = (
+            (z @ m.T).view(-1, nh, config.head_size).transpose(-2, -3)
+            for m, nh, z in (
+                (layer.attn_q, config.q_heads, q_input),
+                (layer.attn_k, config.kv_heads, kv_input),
+                (layer.attn_v, config.kv_heads, kv_input),
+            )
+        )
+        if cross_attn:
+            q, k = rms_norm(q, layer.attn_q_norm), rms_norm(k, layer.attn_k_norm)
+        else:
+            q, k = rotate(q, cos, sin), rotate(k, cos, sin)
+
+        # Add dummy batch axis for torch performance
+        mix = F.scaled_dot_product_attention(
+            q[None], k[None], v[None], is_causal=not cross_attn, enable_gqa=True
+        ).squeeze(0)
+        hidden += mix.transpose(-2, -3).flatten(start_dim=-2) @ layer.attn_o.T
+
+        z = rms_norm(hidden, layer.mlp_norm)
+        z = F.silu(z @ layer.mlp_gate.T) * (z @ layer.mlp_up.T)
+        hidden += z @ layer.mlp_down.T
+    return hidden
+
+
+def text_model(
+    config: TextConfig, params: TextParams, text: Tensor, vision_out: Tensor
+) -> Tensor:
+    hidden = params.embedding[text]
+    hidden = text_transformer(config, params.layers, hidden, vision_out)
+    hidden = rms_norm(hidden, params.final_norm)
+    return hidden @ params.unembedding.T
