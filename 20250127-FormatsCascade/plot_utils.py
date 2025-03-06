@@ -1,12 +1,14 @@
 """Generate paper-ready plots"""
 
+import inspect
+import re
+import subprocess
 from pathlib import Path
+from typing import Any, Callable
 
 import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
-import subprocess
-import sys
 
 PALETTE = sns.color_palette("Dark2")
 
@@ -49,6 +51,20 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
         )
 
 
+def push_to_paper() -> None:
+    for git_cmd in [
+        "add code/ fig/",
+        "commit -m 'Update figures' --quiet",
+        "pull --rebase --quiet",
+        "push --quiet",
+    ]:
+        cmd = f"git -C overleaf {git_cmd}"
+        # print(f"$ {cmd}", file=sys.stderr)
+        if subprocess.call(cmd, shell=True):
+            print(f"Error running {cmd!r} -- aborting")
+            return
+
+
 def save(name: str, push: bool = True) -> None:
     """Save and push a figure to the paper."""
     root = Path("overleaf/fig")
@@ -58,14 +74,14 @@ def save(name: str, push: bool = True) -> None:
         )
     plt.savefig(root / f"{name}.pdf", bbox_inches="tight")
     if push:
-        for git_cmd in [
-            "add fig/",
-            "commit -m 'Update figures' --quiet",
-            "pull --rebase --quiet",
-            "push --quiet",
-        ]:
-            cmd = f"git -C overleaf {git_cmd}"
-            # print(f"$ {cmd}", file=sys.stderr)
-            if subprocess.call(cmd, shell=True):
-                print(f"Error running {cmd} - aborting")
-                return
+        push_to_paper()
+
+
+def save_code(fn: Callable[..., Any], push: bool = True) -> None:
+    body = inspect.getsource(fn).splitlines()[1:]
+    body = [re.sub(r"^    ", "", x) for x in body]
+    body = [x for x in body if "# IGNORE" not in x]
+    code = "\n".join(body) + "\n"
+    (Path("overleaf/code") / f"{fn.__name__}.py").write_text(code)
+    if push:
+        push_to_paper()
