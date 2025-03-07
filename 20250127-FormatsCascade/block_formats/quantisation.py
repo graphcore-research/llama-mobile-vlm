@@ -388,33 +388,24 @@ NF4 = LUTFormat(
 
 def crd_gauss(bits: float, multiplier: float = 3) -> LUTFormat:
     """Cube-root-pdf quantisation for Normal-distributed data, rms=1."""
-    table = tuple(
-        scipy.stats.norm.ppf(
-            torch.linspace(0, 1, int(2**bits) + 2), scale=multiplier**0.5
-        )[1:-1].tolist()
-    )
+    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
+    table = tuple(scipy.stats.norm.ppf(p, scale=multiplier**0.5).tolist())
     return LUTFormat(table, "CRD-G" + (f"{{{multiplier}}}" if multiplier != 3 else ""))
 
 
 def crd_laplace(bits: float, multiplier: float = 3) -> LUTFormat:
     """Cube-root-pdf quantisation for Laplace-distributed data, rms=1."""
-    table = tuple(
-        scipy.stats.laplace.ppf(
-            torch.linspace(0, 1, int(2**bits) + 2), scale=multiplier / 2**0.5
-        )[1:-1].tolist()
-    )
+    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
+    table = tuple(scipy.stats.laplace.ppf(p, scale=multiplier / 2**0.5).tolist())
     return LUTFormat(table, "CRD-L" + (f"{{{multiplier}}}" if multiplier != 3 else ""))
 
 
 def crd_t(bits: float, dof: float, multiplier: float = 3) -> LUTFormat:
     """Cube-root-pdf quantisation for Student-T-distributed data, rms=1."""
     cdof = (dof + 1 - multiplier) / multiplier
-    cscale = (cdof * (dof - 2)) ** 0.5
-    table = tuple(
-        scipy.stats.t.ppf(torch.linspace(0, 1, int(2**bits) + 2), cdof, scale=cscale)[
-            1:-1
-        ].tolist()
-    )
+    cscale = ((dof - 2) / cdof) ** 0.5
+    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
+    table = tuple(scipy.stats.t.ppf(p, cdof, scale=cscale).tolist())
     return LUTFormat(
         table, f"CRD-T[{dof:.1f}]" + (f"{{{multiplier}}}" if multiplier != 3 else "")
     )

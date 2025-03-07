@@ -34,6 +34,7 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
             "axes.spines.right": False,
             "legend.edgecolor": "none",
             "legend.fontsize": "11",
+            "axes.titlesize": "11",
             "lines.markersize": 3,
         }
     )
