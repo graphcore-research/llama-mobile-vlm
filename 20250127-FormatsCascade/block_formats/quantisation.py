@@ -5,7 +5,17 @@
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Literal, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import scipy.stats
 import torch
@@ -386,52 +396,114 @@ NF4 = LUTFormat(
 # Cube-root-density optimal formats
 
 
-def crd_gauss(bits: float, multiplier: float = 3) -> LUTFormat:
-    """Cube-root-pdf quantisation for Normal-distributed data, rms=1."""
-    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
-    table = tuple(scipy.stats.norm.ppf(p, scale=multiplier**0.5).tolist())
-    return LUTFormat(table, "CRD-G" + (f"{{{multiplier}}}" if multiplier != 3 else ""))
-
-
-def crd_laplace(bits: float, multiplier: float = 3) -> LUTFormat:
-    """Cube-root-pdf quantisation for Laplace-distributed data, rms=1."""
-    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
-    table = tuple(scipy.stats.laplace.ppf(p, scale=multiplier / 2**0.5).tolist())
-    return LUTFormat(table, "CRD-L" + (f"{{{multiplier}}}" if multiplier != 3 else ""))
-
-
-def crd_t(bits: float, dof: float, multiplier: float = 3) -> LUTFormat:
-    """Cube-root-pdf quantisation for Student-T-distributed data, rms=1."""
-    cdof = (dof + 1 - multiplier) / multiplier
-    cscale = ((dof - 2) / cdof) ** 0.5
-    p = torch.linspace(0, 1, int(2**bits) + 2)[1:-1]
-    table = tuple(scipy.stats.t.ppf(p, cdof, scale=cscale).tolist())
-    return LUTFormat(
-        table, f"CRD-T[{dof:.1f}]" + (f"{{{multiplier}}}" if multiplier != 3 else "")
-    )
-
-
-def crd_trunc_gauss(
-    bits: float, group_size: int, symmetric: bool, multiplier: float = 3
+def crd_quantiser(
+    n: int,
+    scaling: Literal["rms", "absmax", "signmax"],
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"],
+    name: str,
+    icdf: Callable[[Tensor, float], Tensor],
+    power: float = 1 / 3,
 ) -> LUTFormat:
-    scale = multiplier**0.5 / torch.tensor(group_size).div(torch.pi).log().mul(2).sqrt()
-    table = tuple(
-        scipy.stats.truncnorm.ppf(
-            torch.linspace(0, 1, int(2**bits) + (not symmetric)),
-            -1 / scale,
-            1 / scale,
-            scale=scale,
-        )[1:-1].tolist()
-    )
-    if symmetric:
-        table = (-1, *table)
-    table = (*table, 1)
+    # For cdf in [0.0, 0.5] and [0.5, 1.0], should we include the endpoints?
+    # 1 = yes, 0 = no.
+    neg_min, neg_max, pos_min, pos_max = {
+        ("symmetric", "rms"): (0, 0, 0, 0),
+        ("symmetric", "absmax"): (1, 0, 0, 1),
+        ("repeat_zero", "rms"): (0, 1, 1, 0),
+        ("repeat_zero", "absmax"): (1, 1, 1, 1),
+        ("asymmetric", "rms"): (0, 1, 0, 0),
+        ("asymmetric", "absmax"): (1, 1, 0, 1),
+        ("asymmetric", "signmax"): (0, 1, 0, 1),
+    }[(mode, scaling)]
+    if not (neg_max or pos_min):
+        # Need to special-case this, otherwise we'd have a double-gap around zero
+        p = torch.linspace(0, 1, n + 2 - neg_min - pos_max)[1 - neg_min :][:n]
+    else:
+        halfn = n // 2
+        off = 1 - neg_min
+        p_neg = torch.linspace(0, 0.5, halfn + 2 - neg_min - neg_max)[off : halfn + off]
+        off = 1 - pos_min
+        p_pos = torch.linspace(0.5, 1, halfn + 2 - pos_min - pos_max)[off : halfn + off]
+        p = torch.cat([p_neg, p_pos])
 
-    name = "CRD-TG"
-    name += "-S" if symmetric else "-A"
-    if multiplier != 3:
-        name += f"{{{multiplier}}}"
-    return LUTFormat(table, name)
+    table = tuple(icdf(p, power).tolist())
+    scaling_name = dict(rms="R", absmax="A", signmax="S")[scaling]
+    mode_name = dict(symmetric="S", repeat_zero="Z", asymmetric="A")[mode]
+    if power == 1 / 3:
+        power_name = ""
+    elif power < 1:
+        power_name = f"{{1/{1/power:.0f}}}"
+    else:
+        power_name = f"{{{power:.0f}}}"
+    return LUTFormat(table, f"CRD-{name}-{scaling_name}{mode_name}{power_name}")
+
+
+def crd_normal(
+    bits: float,
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
+) -> LUTFormat:
+    """Cube-root-pdf quantisation for Normal-distributed data, rms=1."""
+    return crd_quantiser(
+        int(2**bits),
+        scaling="rms",
+        mode=mode,
+        name="N",
+        icdf=lambda p, power: scipy.stats.norm.ppf(p, scale=power**-0.5),
+        **args,
+    )
+
+
+def crd_laplace(
+    bits: float,
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
+) -> LUTFormat:
+    """Cube-root-pdf quantisation for Laplace-distributed data, rms=1."""
+    return crd_quantiser(
+        int(2**bits),
+        scaling="rms",
+        mode=mode,
+        name="L",
+        icdf=lambda p, power: scipy.stats.laplace.ppf(p, scale=1 / (power * 2**0.5)),
+        **args,
+    )
+
+
+def crd_t(
+    bits: float,
+    dof: float,
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
+) -> LUTFormat:
+    """Cube-root-pdf quantisation for Student-T-distributed data, rms=1."""
+
+    def icdf(p: Tensor, power: float) -> Tensor:
+        cdof = (dof + 1 - 1 / power) * power
+        cscale = ((dof - 2) / cdof) ** 0.5
+        return scipy.stats.t.ppf(p, cdof, scale=cscale)
+
+    return crd_quantiser(
+        int(2**bits), scaling="rms", mode=mode, name="T", icdf=icdf, **args
+    )
+
+
+def crd_block_normal(
+    bits: float,
+    block_size: int,
+    scaling: Literal["absmax", "signmax"] = "absmax",
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
+) -> LUTFormat:
+    """Cube-root-pdf quantisation for (absmax|signmax)-normalised Normal data."""
+
+    def icdf(p: Tensor, power: float) -> Tensor:
+        s = power**-0.5 / torch.tensor(block_size).div(torch.pi).log().mul(2).sqrt()
+        return scipy.stats.truncnorm.ppf(p, -1 / s, 1 / s, scale=s)
+
+    return crd_quantiser(
+        int(2**bits), scaling=scaling, mode=mode, name="N", icdf=icdf, **args
+    )
 
 
 def _trunclaplace_ppf(q: Tensor, a: float, scale: float = 1) -> Tensor:
@@ -443,25 +515,53 @@ def _trunclaplace_ppf(q: Tensor, a: float, scale: float = 1) -> Tensor:
     )
 
 
-def crd_trunc_laplace(
-    bits: float, group_size: int, symmetric: bool, multiplier: float = 3
+def crd_block_laplace(
+    bits: float,
+    block_size: int,
+    scaling: Literal["absmax", "signmax"] = "absmax",
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
 ) -> LUTFormat:
-    scale = multiplier / (0.57721566 + torch.tensor(group_size).log())
-    table = tuple(
-        _trunclaplace_ppf(
-            torch.linspace(0, 1, int(2**bits) + (not symmetric)),
-            float(1 / scale),
-            scale=scale,
-        )[1:-1].tolist()
+    """Cube-root-pdf quantisation for (absmax|signmax)-normalised Laplace data."""
+
+    def icdf(p: Tensor, power: float) -> Tensor:
+        scale = power**-1 / (0.57721566 + torch.tensor(block_size).log())
+        return _trunclaplace_ppf(p, float(1 / scale), scale=scale)
+
+    return crd_quantiser(
+        int(2**bits), scaling=scaling, mode=mode, name="L", icdf=icdf, **args
     )
-    if symmetric:
-        table = (-1, *table)
-    table = (*table, 1)
-    name = "CRD-TL"
-    name += "-S" if symmetric else "-A"
-    if multiplier != 3:
-        name += f"{{{multiplier}}}"
-    return LUTFormat(table, name)
+
+
+def crd_block_t(
+    bits: float,
+    block_size: int,
+    dof: float,
+    scaling: Literal["absmax", "signmax"] = "absmax",
+    mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    **args: Any,
+) -> LUTFormat:
+    """Cube-root-pdf quantisation for (absmax|signmax)-normalised Student-T data."""
+
+    def icdf(p: Tensor, power: float) -> Tensor:
+        expected_max = (
+            torch.tensor(block_size)
+            .div(torch.pi)
+            .log()
+            .mul(2)
+            .pow((dof - 3) / 2)
+            .mul(block_size)
+            .pow(1 / dof)
+            .mul((dof / (dof - 2)) ** 0.5)
+        )
+        cdof = (dof + 1 - 1 / power) * power
+        cscale = (dof / cdof) ** 0.5
+        a0, a1 = scipy.stats.t.cdf([-expected_max, expected_max], cdof, scale=cscale)
+        return scipy.stats.t.ppf(a0 + p * (a1 - a0), cdof, scale=cscale) / expected_max
+
+    return crd_quantiser(
+        int(2**bits), scaling=scaling, mode=mode, name="T", icdf=icdf, **args
+    )
 
 
 # Tensor formats (new)
