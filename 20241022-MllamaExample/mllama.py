@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -524,3 +524,14 @@ def text_model(
     hidden = text_transformer(config, params.layers, hidden, vision_out)
     hidden = rms_norm(hidden, params.final_norm)
     return hidden @ params.unembedding.T
+
+def generate(config: Config, params: Params, inputs: Inputs, n_generated_tokens: int) -> Iterable[int]:
+    with torch.no_grad():
+        hidden = vision_model(config.vision, params.vision, inputs)
+        vision_out = (hidden @ params.vision_text_projection.T + params.vision_text_projection_bias).flatten(end_dim=-2)
+        text = inputs.text
+        for _ in range(n_generated_tokens):
+            logits = text_model(config.text, params.text, text, vision_out)
+            token = logits[-1].argmax(-1)
+            yield int(token)
+            text = torch.cat([text, token[None]])
