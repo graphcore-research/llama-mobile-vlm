@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 PALETTE = sns.color_palette("Dark2")
+SEQ_PALETTE = sns.color_palette("flare", as_cmap=True)
 
 
 def configure(disable_tex_for_debug_speed: bool = False) -> None:
@@ -29,6 +30,14 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
             "font.family": "serif",
             "font.serif": [font_name],
             "text.usetex": not disable_tex_for_debug_speed,
+            # Latex
+            "text.latex.preamble": "\n".join(
+                [
+                    r"\usepackage{amsmath}",
+                    r"\usepackage{bm}",
+                    r"\newcommand{\norm}[2]{\left \lVert #1 \right \rVert_{#2}}",
+                ]
+            ),
             # General
             "axes.spines.top": False,
             "axes.spines.right": False,
