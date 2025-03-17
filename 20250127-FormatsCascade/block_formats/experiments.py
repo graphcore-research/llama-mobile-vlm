@@ -22,13 +22,6 @@ from . import quantisation as Q
 CODE_CHANGES = ("lut-bucketize", "rename-to-block")
 
 
-def shuffle(t: Tensor) -> Tensor:
-    """Shuffle the flattened tensor, then reassemble."""
-    y = torch.empty_like(t.flatten())
-    y[torch.randperm(t.nelement(), device=t.device, dtype=torch.int32)] = t.flatten()
-    return y.view(t.shape)
-
-
 ### token_prediction
 
 
@@ -407,7 +400,7 @@ def tensor_stats(w: Tensor) -> dict[str, Any]:
             max=w.abs().amax().item(),
             block_max=[_mean_block_amax(w, b).item() for b in block_sizes],
             block_max_shuffled=[
-                _mean_block_amax(shuffle(w), b).item() for b in block_sizes
+                _mean_block_amax(Q.shuffle(w), b).item() for b in block_sizes
             ],
             # Histograms
             hist=_scaled_hist(w, hist_bins, dim=None).tolist(),

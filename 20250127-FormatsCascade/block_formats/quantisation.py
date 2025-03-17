@@ -2,6 +2,7 @@
 
 """Utilities for "fake quantisation"."""
 
+import itertools as it
 import math
 import re
 from dataclasses import dataclass
@@ -13,15 +14,26 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    TypeAlias,
     Union,
     cast,
 )
 
 import scipy.stats
 import torch
+import tqdm
 from torch import Tensor, nn
 
 Shape = Tuple[int, ...]
+
+# Utilities
+
+
+def shuffle(t: Tensor) -> Tensor:
+    """Shuffle the flattened tensor, then reassemble."""
+    y = torch.empty_like(t.flatten())
+    y[torch.randperm(t.nelement(), device=t.device, dtype=torch.int32)] = t.flatten()
+    return y.view(t.shape)
 
 
 def rmse_norm(x: Tensor, qx: Tensor) -> Tensor:
@@ -34,6 +46,9 @@ def snr(x: Tensor, qx: Tensor) -> Tensor:
     x = x.float()
     qx = qx.float()
     return x.pow(2).sum() / (qx - x).pow(2).sum()
+
+
+# Tensor formats
 
 
 class TensorFormat:
@@ -342,22 +357,94 @@ def lut_function(fn: Callable[[Tensor], Tensor], bits: int, name: str) -> LUTFor
     return LUTFormat.create(fn(torch.linspace(-1, 1, steps=2**bits)), name)
 
 
-def lut_lloyd_max(tensor: Tensor, bits: float, iterations: int) -> LUTFormat:
-    """Use Lloyd-Max (k-means) to find the RMS-optimal quantiser for the given tensor"""
-    tensor = tensor.flatten()
-    mean, std = tensor.mean(), tensor.std()
-    values = torch.linspace(
-        mean - 2 * std,
-        mean + 2 * std,
-        int(2**bits),
-        dtype=tensor.dtype,
-        device=tensor.device,
-    )
-    for _ in range(iterations):
-        idx = (tensor[..., None] - values).abs().argmin(-1)
-        values.scatter_reduce_(0, idx, tensor, "mean", include_self=False)
-    assert (values[:-1] < values[1:]).all().item()
-    return LUTFormat.create(values, "LM")
+LloydMaxInit: TypeAlias = Union[
+    Tensor, tuple[Literal["uniform"], float], Literal["kmeans++"], Literal["cuberoot"]
+]
+
+
+def _lloyd_max_init(init: LloydMaxInit, tensor: Tensor, codepoints: int) -> Tensor:
+    if isinstance(init, Tensor):
+        assert init.shape == (codepoints,)
+        return init.to(tensor.dtype, copy=True)
+    if isinstance(init, tuple) and len(init) == 2 and init[0] == "uniform":
+        mean, std = tensor.mean(), tensor.std()
+        return torch.linspace(
+            mean - init[1] * std,
+            mean + init[1] * std,
+            codepoints,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    if init == "kmeans++":
+        s = tensor[: int(2**20)]
+        midpoints = torch.empty(codepoints, device=s.device, dtype=s.dtype)
+        p = torch.ones_like(s)
+        for i in range(codepoints):
+            midpoints[i] = s[torch.multinomial(p / p.sum(), 1)]
+            midpoints[: i + 1] = midpoints[: i + 1].sort().values
+            closest = torch.bucketize(s, (midpoints[:i] + midpoints[1 : i + 1]) / 2)
+            p = (s - midpoints[closest]) ** 2
+        return midpoints
+    if init == "cuberoot":
+        s = tensor[: int(2**20)].sort().values
+        delta = (s[1:] - s[:-1]) ** (2 / 3)
+        # delta += delta.mean()
+        delta_sum = delta.cumsum(0)
+        loc = torch.linspace(
+            0, delta_sum[-1], codepoints + 2, device=s.device, dtype=s.dtype
+        )[1:-1]
+        # Note - it would be better to interpolate here, rather than round-to-nearest
+        return s[torch.bucketize(loc, delta_sum)]
+    raise ValueError(f"Unexpected init scheme {init}")
+
+
+def lut_lloyd_max(
+    tensor: Tensor,
+    bits: float,
+    threshold: float,
+    *,
+    init: LloydMaxInit = "kmeans++",
+    incremental: bool = True,
+    max_samples: int | None = None,
+    dtype: torch.dtype | None = None,
+    progress: bool = False,
+) -> LUTFormat:
+    """Use Lloyd-Max (k-means) to find the RMS-optimal quantiser for the given tensor.
+
+    threshold -- when the ratio of changed cluster assignments <= threshold, stop
+
+    incremental -- start with a subset of the data and scale up
+    """
+    # Preparation: shuffle, truncate, cast, get init
+    tensor = shuffle(tensor.flatten())
+    if max_samples is not None:
+        tensor = tensor[:max_samples]
+    if dtype is None:
+        # Very large tensors have stability problems due the float32
+        # mantissa length, so default to float64
+        dtype = torch.float32 if tensor.nelement() <= 2**26 else torch.float64
+    tensor = tensor.to(dtype)
+    midpoints = _lloyd_max_init(init, tensor, int(2**bits))
+
+    # K-means iteration
+    idx = torch.empty(tensor.shape, device=tensor.device, dtype=torch.int64)
+    last_idx = torch.empty_like(idx)
+    n = 2**20 if incremental else tensor.nelement()
+    tqdm_ = tqdm.tqdm(it.count(), disable=not progress)
+    for _ in tqdm_:
+        last_idx[:n] = idx[:n]
+        boundaries = (midpoints[1:] + midpoints[:-1]) / 2
+        torch.bucketize(tensor[:n], boundaries, out=idx[:n])
+        midpoints.scatter_reduce_(0, idx[:n], tensor[:n], "mean", include_self=False)
+        midpoints = torch.cummax(midpoints, 0).values
+        idx_change = (last_idx[:n] != idx[:n]).float().mean().item()
+        tqdm_.set_postfix_str(f"{idx_change:.1e}")
+        if idx_change <= threshold:
+            if tensor.nelement() <= n:
+                break
+            n *= 2
+    assert (midpoints[:-1] <= midpoints[1:]).all().item()
+    return LUTFormat.create(midpoints, "LM")
 
 
 def nf_approx(bits: int) -> LUTFormat:
