@@ -707,13 +707,19 @@ class LinearScalingFormat(TensorFormat):
         assert len(tensor_shape) == len(group_shape), f"{tensor_shape} vs {group_shape}"
         return tuple((t if g is None else g) for t, g in zip(tensor_shape, group_shape))
 
+    @classmethod
+    def _scale_shape_for(cls, tensor_shape: Shape, group_shape: GroupShape) -> Shape:
+        return tuple(
+            t // g
+            for t, g in zip(
+                tensor_shape, cls._group_shape_for(tensor_shape, group_shape)
+            )
+        )
+
     def count_bits(self, shape: Shape) -> int:
         element_bits = self.element_format.count_bits(shape)
         scale_bits = self.scale_format.count_bits(
-            tuple(
-                t // g
-                for t, g in zip(shape, self._group_shape_for(shape, self.group_shape))
-            )
+            self._scale_shape_for(shape, self.group_shape)
         )
         return element_bits + scale_bits
 
@@ -813,6 +819,87 @@ class ChannelAndSparseFormat(TensorFormat):
         qtensor = self.element_format.quantise(qtensor / scale) * scale
         qtensor[sparse_idx] = self.sparse_format.quantise(tensor.flatten()[sparse_idx])
         return qtensor.reshape(tensor.shape)
+
+
+# "Compression" formats
+
+
+@dataclass
+class UniformAndCompressionFormat(TensorFormat):
+    """A uniform grid, followed by an optimal compressor."""
+
+    half_range: float
+    model_logp: Tensor
+
+    def __post_init__(self):
+        assert self.model_logp.exp().sum().sub(1).abs().item() < 1e-4
+
+    def __str__(self) -> str:
+        return f"CGRID[{1 / self._scale:.1g}]"
+
+    @property
+    def _scale(self) -> float:
+        return (len(self.model_logp) - 1) / self.half_range / 2
+
+    @property
+    def _offset(self) -> float:
+        return (len(self.model_logp) - 1) / 2
+
+    def _to_idx(self, tensor: Tensor) -> Tensor:
+        return (
+            tensor.mul(self._scale)
+            .add_(self._offset)
+            .round_()
+            .long()
+            .clip_(0, len(self.model_logp) - 1)
+        )
+
+    def _to_values(self, idx: Tensor, dtype: torch.dtype) -> Tensor:
+        return idx.to(dtype).sub_(self._offset).div_(self._scale)
+
+    def quantise(self, tensor: Tensor) -> Tensor:
+        return self._to_values(self._to_idx(tensor), tensor.dtype)
+
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
+        return -self.model_logp[self._to_idx(tensor)].sum().div(log2).item()
+
+    @classmethod
+    def train(
+        cls, data: Tensor, resolution: float, smoothing: float = 1.0
+    ) -> "UniformAndCompressionFormat":
+        amax = data.abs().amax().item()
+        n = 1 + 2 * torch.tensor(amax).div(resolution).ceil().long().item()
+        half_range = n // 2 * resolution
+        tmp_logp = torch.full((n,), 1 / n, device=data.device, dtype=data.dtype).log_()
+        counts = (
+            cls(half_range, tmp_logp)
+            ._to_idx(data)
+            .bincount(minlength=n)
+            .to(data.dtype)
+            .add_(smoothing)
+        )
+        return cls(half_range, counts.div_(counts.sum()).log_())
+
+    def count_bits(self, shape: Shape) -> int:
+        raise NotImplementedError(
+            "UniformAndCompresionFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
+        )
+
+
+@dataclass
+class LinearScalingCompressionFormat(LinearScalingFormat):
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        element_bits = self.element_format.count_bits_tensor(tensor)
+        scale_bits = self.scale_format.count_bits(
+            self._scale_shape_for(tensor.shape, self.group_shape)
+        )
+        return element_bits + scale_bits
+
+    def count_bits(self, shape: Shape) -> int:
+        raise NotImplementedError(
+            "LinearScalingCompressionFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
+        )
 
 
 # Model parameters
