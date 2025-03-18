@@ -358,7 +358,9 @@ def lut_function(fn: Callable[[Tensor], Tensor], bits: int, name: str) -> LUTFor
 
 
 LloydMaxInit: TypeAlias = Union[
-    Tensor, tuple[Literal["uniform"], float], Literal["kmeans++"], Literal["cuberoot"]
+    Tensor,
+    tuple[Literal["uniform_rms"], float],
+    Literal["uniform_minmax", "kmeans++", "cuberoot"],
 ]
 
 
@@ -366,11 +368,19 @@ def _lloyd_max_init(init: LloydMaxInit, tensor: Tensor, codepoints: int) -> Tens
     if isinstance(init, Tensor):
         assert init.shape == (codepoints,)
         return init.to(tensor.dtype, copy=True)
-    if isinstance(init, tuple) and len(init) == 2 and init[0] == "uniform":
+    if isinstance(init, tuple) and len(init) == 2 and init[0] == "uniform_rms":
         mean, std = tensor.mean(), tensor.std()
         return torch.linspace(
             mean - init[1] * std,
             mean + init[1] * std,
+            codepoints,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    if init == "uniform_minmax":
+        return torch.linspace(
+            tensor.min(),
+            tensor.max(),
             codepoints,
             device=tensor.device,
             dtype=tensor.dtype,
@@ -522,7 +532,7 @@ def crd_quantiser(
         power_name = f"{{1/{1/power:.0f}}}"
     else:
         power_name = f"{{{power:.0f}}}"
-    return LUTFormat(table, f"CRD-{name}-{scaling_name}{mode_name}{power_name}")
+    return LUTFormat(table, f"CRD{power_name}-{name}-{scaling_name}{mode_name}")
 
 
 def crd_normal(
@@ -570,8 +580,9 @@ def crd_t(
         cscale = ((df - 2) / cdof) ** 0.5
         return scipy.stats.t.ppf(p, cdof, scale=cscale)
 
+    name_df = f"{df:.0f}" if int(df) == df else str(df)
     return crd_quantiser(
-        int(2**bits), scaling="rms", mode=mode, name="T", icdf=icdf, **args
+        int(2**bits), scaling="rms", mode=mode, name=f"T[{name_df}]", icdf=icdf, **args
     )
 
 
@@ -646,8 +657,14 @@ def crd_block_t(
         a0, a1 = scipy.stats.t.cdf([-expected_max, expected_max], cdof, scale=cscale)
         return scipy.stats.t.ppf(a0 + p * (a1 - a0), cdof, scale=cscale) / expected_max
 
+    name_df = f"{df:.0f}" if int(df) == df else str(df)
     return crd_quantiser(
-        int(2**bits), scaling=scaling, mode=mode, name="T", icdf=icdf, **args
+        int(2**bits),
+        scaling=scaling,
+        mode=mode,
+        name=f"T[{name_df}]",
+        icdf=icdf,
+        **args,
     )
 
 
