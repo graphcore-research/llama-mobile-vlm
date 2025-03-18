@@ -350,7 +350,7 @@ def _studentt_fit(
 ) -> tuple[Tensor, Tensor]:
     """Compute maximum-likelhood fit of (df, scale) of a zero-mean Student-T distribution to samples `t`.
 
-    returns (dof, scale)
+    returns (df, scale)
     """
     best_log_likelihood = tensor(-torch.inf, device=t.device)
     best_params = None

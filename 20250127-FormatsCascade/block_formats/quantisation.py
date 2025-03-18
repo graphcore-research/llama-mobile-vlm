@@ -559,15 +559,15 @@ def crd_laplace(
 
 def crd_t(
     bits: float,
-    dof: float,
+    df: float,
     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
     **args: Any,
 ) -> LUTFormat:
     """Cube-root-pdf quantisation for Student-T-distributed data, rms=1."""
 
     def icdf(p: Tensor, power: float) -> Tensor:
-        cdof = (dof + 1 - 1 / power) * power
-        cscale = ((dof - 2) / cdof) ** 0.5
+        cdof = (df + 1 - 1 / power) * power
+        cscale = ((df - 2) / cdof) ** 0.5
         return scipy.stats.t.ppf(p, cdof, scale=cscale)
 
     return crd_quantiser(
@@ -623,7 +623,7 @@ def crd_block_laplace(
 def crd_block_t(
     bits: float,
     block_size: int,
-    dof: float,
+    df: float,
     scaling: Literal["absmax", "signmax"] = "absmax",
     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
     **args: Any,
@@ -636,13 +636,13 @@ def crd_block_t(
             .div(torch.pi)
             .log()
             .mul(2)
-            .pow((dof - 3) / 2)
+            .pow((df - 3) / 2)
             .mul(block_size)
-            .pow(1 / dof)
-            .mul((dof / (dof - 2)) ** 0.5)
+            .pow(1 / df)
+            .mul((df / (df - 2)) ** 0.5)
         )
-        cdof = (dof + 1 - 1 / power) * power
-        cscale = (dof / cdof) ** 0.5
+        cdof = (df + 1 - 1 / power) * power
+        cscale = (df / cdof) ** 0.5
         a0, a1 = scipy.stats.t.cdf([-expected_max, expected_max], cdof, scale=cscale)
         return scipy.stats.t.ppf(a0 + p * (a1 - a0), cdof, scale=cscale) / expected_max
 
