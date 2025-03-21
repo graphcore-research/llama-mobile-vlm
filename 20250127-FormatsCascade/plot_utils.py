@@ -22,7 +22,7 @@ DISPLAY_NAMES = {
     "qrmse_norm": "$R$",
     "LM": "Lloyd-Max",
 }
-CRP_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
+CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
 
 
 def display_name(t: str) -> str:
@@ -30,7 +30,7 @@ def display_name(t: str) -> str:
         return DISPLAY_NAMES[t]
     if m := re.match(r"CRD-(N|L|T\[([\d.]+)\])-[RA]S", t):
         return (
-            CRP_LABEL
+            CRD_LABEL
             + dict(
                 N=lambda: " Normal",
                 L=lambda: " Laplace",
@@ -92,7 +92,8 @@ def share_legend(figure: matplotlib.figure.Figure) -> None:
     handles, labels = figure.axes[00].get_legend_handles_labels()
     for ax in figure.axes:
         assert ax.get_legend_handles_labels()[1] == labels
-        ax.legend_.remove()
+        if ax.legend_ is not None:
+            ax.legend_.remove()
     figure.legend(handles, labels, loc="center left", bbox_to_anchor=(1, 0.5))
 
 
@@ -100,7 +101,7 @@ def tidy(figure: matplotlib.figure.Figure) -> None:
     figure.tight_layout()
 
     for ax in figure.axes:
-        for label in [ax.xaxis.label, ax.yaxis.label]:
+        for label in [ax.xaxis.label, ax.yaxis.label, ax.title]:
             label.set_text(display_name(label.get_text()))
 
     for legend in filter(None, [ax.legend_ for ax in figure.axes] + figure.legends):

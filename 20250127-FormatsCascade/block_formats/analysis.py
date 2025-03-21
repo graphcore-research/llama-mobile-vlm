@@ -21,13 +21,18 @@ def rms_normalise(tensor: Tensor) -> Tensor:
     return tensor / rms(tensor)
 
 
-def block_normalise(tensor: Tensor, block_size: int) -> Tensor:
+def block_normalise(
+    tensor: Tensor, scaling: Literal["absmax", "signmax", "rms"], block_size: int | None
+) -> Tensor:
     """Divide a tensor by its block-absmax (on the last dimension)."""
-    return (
-        tensor.view(-1, block_size)
-        .div(tensor.view(-1, block_size).abs().amax(-1, keepdim=True))
-        .view(tensor.shape)
-    )
+    t = tensor.view(-1, block_size) if block_size is not None else tensor.view(-1)
+    t = t.float()
+    norm = dict(
+        absmax=lambda: t.abs().amax(-1),
+        signmax=lambda: torch.where(-t.amin(-1) > t.amax(-1), t.amin(-1), t.amax(-1)),
+        rms=lambda: t.pow(2).mean(-1).sqrt(),
+    )[scaling]()
+    return t.div(norm[..., None]).to(tensor.dtype).view(tensor.shape)
 
 
 def qrmse_norm(fmt: Q.TensorFormat, tensor: Tensor) -> Tensor:
@@ -51,32 +56,25 @@ class Distribution:
         torch.manual_seed(int(np.random.SeedSequence(seed).generate_state(1)[0]))
         return self.torch_distribution(device).sample((n,))
 
-    def rms_quantiser(
+    def quantiser(
         self,
         bits: float,
+        scaling: Literal["rms", "absmax", "signmax"] = "rms",
+        block_size: int | None = None,
         mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
         **args: Any
     ):
         d = dict(self.__dict__)
         d.pop("scale")
-        return dict(
-            Normal=Q.crd_normal,
-            Laplace=Q.crd_laplace,
-            StudentT=Q.crd_t,
-        )[
-            type(self).__name__
-        ](bits, mode=mode, **d, **args)
-
-    def absmax_quantiser(
-        self,
-        bits: float,
-        block_size: int,
-        scaling: Literal["absmax", "signmax"] = "absmax",
-        mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
-        **args: Any
-    ):
-        d = dict(self.__dict__)
-        d.pop("scale")
+        if scaling == "rms":
+            assert block_size is None, "rms scaling doesn't support block size"
+            return dict(
+                Normal=Q.crd_normal,
+                Laplace=Q.crd_laplace,
+                StudentT=Q.crd_t,
+            )[
+                type(self).__name__
+            ](bits, mode=mode, **d, **args)
         return dict(
             Normal=Q.crd_block_normal,
             Laplace=Q.crd_block_laplace,
@@ -84,6 +82,40 @@ class Distribution:
         )[type(self).__name__](
             bits, block_size, scaling=scaling, mode=mode, **d, **args
         )
+
+    # def rms_quantiser(
+    #     self,
+    #     bits: float,
+    #     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    #     **args: Any
+    # ):
+    #     d = dict(self.__dict__)
+    #     d.pop("scale")
+    #     return dict(
+    #         Normal=Q.crd_normal,
+    #         Laplace=Q.crd_laplace,
+    #         StudentT=Q.crd_t,
+    #     )[
+    #         type(self).__name__
+    #     ](bits, mode=mode, **d, **args)
+
+    # def absmax_quantiser(
+    #     self,
+    #     bits: float,
+    #     block_size: int,
+    #     scaling: Literal["absmax", "signmax"] = "absmax",
+    #     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
+    #     **args: Any
+    # ):
+    #     d = dict(self.__dict__)
+    #     d.pop("scale")
+    #     return dict(
+    #         Normal=Q.crd_block_normal,
+    #         Laplace=Q.crd_block_laplace,
+    #         StudentT=Q.crd_block_t,
+    #     )[type(self).__name__](
+    #         bits, block_size, scaling=scaling, mode=mode, **d, **args
+    #     )
 
 
 @dataclass
