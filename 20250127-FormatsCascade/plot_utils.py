@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
-
+import fractions
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,6 +23,18 @@ DISPLAY_NAMES = {
     "LM": "Lloyd-Max",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
+
+
+def format_fraction(max_denominator: int = 10) -> Callable[[float, int], str]:
+    def _format(x: float, n: int) -> str:
+        if x == 0:
+            return "0"
+        f = fractions.Fraction.from_float(x).limit_denominator(max_denominator)
+        if f.denominator == 1:
+            return str(f.numerator)
+        return f"$\\frac{{{f.numerator}}}{{{f.denominator}}}$"
+
+    return _format
 
 
 def display_name(t: str) -> str:

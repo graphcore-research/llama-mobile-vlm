@@ -2,6 +2,7 @@
 
 """Utilities for "fake quantisation"."""
 
+import bz2
 import itertools as it
 import math
 import re
@@ -12,13 +13,13 @@ from typing import (
     Iterable,
     Literal,
     Optional,
-    Sequence,
     Tuple,
     TypeAlias,
     Union,
     cast,
 )
 
+import dahuffman
 import scipy.stats
 import torch
 import tqdm
@@ -291,11 +292,15 @@ class LUTFormat(ScalarFormat):
     def range(self) -> tuple[float, float]:
         return (min(self.values), max(self.values))
 
-    def quantise(self, x: Tensor) -> Tensor:
+    def to_idx(self, x: Tensor) -> Tensor:
         # This has slightly worse accuracy if computed in x.dtype, so use float32
         values = torch.tensor(self.values, device=x.device)
         boundaries = (values[1:] + values[:-1]).div(2)
-        return values[torch.bucketize(x, boundaries)].to(x.dtype)
+        return torch.bucketize(x, boundaries)
+
+    def quantise(self, x: Tensor) -> Tensor:
+        values = torch.tensor(self.values, device=x.device, dtype=x.dtype)
+        return values[self.to_idx(x)]
 
 
 @dataclass
@@ -355,6 +360,16 @@ def parse(value: str) -> ScalarFormat:
 def lut_function(fn: Callable[[Tensor], Tensor], bits: int, name: str) -> LUTFormat:
     """A lookup table quantiser based on mapping [-1, 1] via a function"""
     return LUTFormat.create(fn(torch.linspace(-1, 1, steps=2**bits)), name)
+
+
+def lut_grid(resolution: float, max: float) -> LUTFormat:
+    """A fixed-resolution grid that spans (-max, max)."""
+    half_n = torch.tensor(max).div(resolution).ceil().long().item()
+    values = torch.arange(-half_n, half_n + 1).mul(resolution)
+    return LUTFormat.create(values, f"GRID{{{resolution}}}")
+
+
+# Lloyd-Max
 
 
 LloydMaxInit: TypeAlias = Union[
@@ -523,16 +538,24 @@ def crd_quantiser(
         p_pos = torch.linspace(0.5, 1, halfn + 2 - pos_min - pos_max)[off : halfn + off]
         p = torch.cat([p_neg, p_pos])
 
-    table = tuple(icdf(p, power).tolist())
+    if power == 0:
+        if scaling == "rms":
+            raise ValueError(
+                f"Cannot use power=0 with scaling='rms', as the pdf doesn't normalise"
+            )
+        table = 2 * p - 1
+    else:
+        table = icdf(p, power)
+
     scaling_name = dict(rms="R", absmax="A", signmax="S")[scaling]
     mode_name = dict(symmetric="S", repeat_zero="Z", asymmetric="A")[mode]
     if power == 1 / 3:
         power_name = ""
-    elif power < 1:
+    elif 0 < power < 1:
         power_name = f"{{1/{1/power:.0f}}}"
     else:
         power_name = f"{{{power:.0f}}}"
-    return LUTFormat(table, f"CRD{power_name}-{name}-{scaling_name}{mode_name}")
+    return LUTFormat.create(table, f"CRD{power_name}-{name}-{scaling_name}{mode_name}")
 
 
 def crd_normal(
@@ -824,71 +847,87 @@ class ChannelAndSparseFormat(TensorFormat):
 # "Compression" formats
 
 
-@dataclass
-class UniformAndCompressionFormat(TensorFormat):
-    """A uniform grid, followed by an optimal compressor."""
-
-    half_range: float
-    model_logp: Tensor
-
-    def __post_init__(self):
-        assert self.model_logp.exp().sum().sub(1).abs().item() < 1e-4
-
-    def __str__(self) -> str:
-        return f"CGRID[{1 / self._scale:.1g}]"
-
-    @property
-    def _scale(self) -> float:
-        return (len(self.model_logp) - 1) / self.half_range / 2
-
-    @property
-    def _offset(self) -> float:
-        return (len(self.model_logp) - 1) / 2
-
-    def _to_idx(self, tensor: Tensor) -> Tensor:
-        return (
-            tensor.mul(self._scale)
-            .add_(self._offset)
-            .round_()
-            .long()
-            .clip_(0, len(self.model_logp) - 1)
-        )
-
-    def _to_values(self, idx: Tensor, dtype: torch.dtype) -> Tensor:
-        return idx.to(dtype).sub_(self._offset).div_(self._scale)
-
-    def quantise(self, tensor: Tensor) -> Tensor:
-        return self._to_values(self._to_idx(tensor), tensor.dtype)
-
+class CompressedTensorFormat(TensorFormat):
     def count_bits_tensor(self, tensor: Tensor) -> float:
         log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
         return -self.model_logp[self._to_idx(tensor)].sum().div(log2).item()
 
+    def count_bits(self, shape: Shape) -> int:
+        raise NotImplementedError(
+            "CompressedTensorFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
+        )
+
+
+Compressor: TypeAlias = Literal["optimal", "bz2", "huffman"]
+
+
+@dataclass
+class CompressedLUTFormat(CompressedTensorFormat):
+    """A lookup table, followed by a lossless compressor."""
+
+    lut: LUTFormat
+    model_logp: Tensor
+    compressor: Compressor
+
+    def __post_init__(self):
+        assert self.model_logp.shape == (len(self.lut.values),)
+        assert self.model_logp.exp().sum().sub(1).abs().item() < 1e-4
+
+    def __str__(self) -> str:
+        return f"{self.lut}+Z[{self.compressor}]"
+
+    def quantise(self, tensor: Tensor) -> Tensor:
+        return self.lut.quantise(tensor)
+
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        idx = self.lut.to_idx(tensor)
+        if self.compressor == "optimal":
+            log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
+            return -self.model_logp[idx].sum().div(log2).item()
+        if self.compressor == "bz2":
+            idx_bytes = idx.to(torch.uint32).numpy().tobytes()
+            return len(bz2.compress(idx_bytes)) * 8
+        if self.compressor == "huffman":
+            # Note: use freq = p * large-const, since EOF is added with freq=1
+            codec = dahuffman.HuffmanCodec.from_frequencies(
+                {i: p.exp().item() * 2**20 for i, p in enumerate(self.model_logp)}
+            )
+            # We don't count the bits to encode the table, since it's considered
+            # fixed (derived from `model_logp` not `tensor`).
+            return len(codec.encode(idx.numpy())) * 8
+        raise ValueError(f"Unknown compressor {self.compressor!r}")
+
     @classmethod
     def train(
-        cls, data: Tensor, resolution: float, smoothing: float = 1.0
-    ) -> "UniformAndCompressionFormat":
-        amax = data.abs().amax().item()
-        n = 1 + 2 * torch.tensor(amax).div(resolution).ceil().long().item()
-        half_range = n // 2 * resolution
-        tmp_logp = torch.full((n,), 1 / n, device=data.device, dtype=data.dtype).log_()
+        cls,
+        lut: LUTFormat,
+        data: Tensor,
+        smoothing: float = 1.0,
+        compressor: Compressor = "optimal",
+    ) -> "CompressedLUTFormat":
         counts = (
-            cls(half_range, tmp_logp)
-            ._to_idx(data)
-            .bincount(minlength=n)
+            lut.to_idx(data)
+            .bincount(minlength=len(lut.values))
             .to(data.dtype)
             .add_(smoothing)
         )
-        return cls(half_range, counts.div_(counts.sum()).log_())
+        return cls(
+            lut, model_logp=counts.div_(counts.sum()).log_(), compressor=compressor
+        )
 
-    def count_bits(self, shape: Shape) -> int:
-        raise NotImplementedError(
-            "UniformAndCompresionFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
+    @classmethod
+    def train_grid(
+        cls, data: Tensor, resolution: float, **args: Any
+    ) -> "CompressedLUTFormat":
+        return cls.train(
+            lut_grid(resolution, data.abs().amax().item()), data=data, **args
         )
 
 
 @dataclass
 class LinearScalingCompressionFormat(LinearScalingFormat):
+    """Note: requires self.element_format to be a CompressedFormat."""
+
     def count_bits_tensor(self, tensor: Tensor) -> float:
         element_bits = self.element_format.count_bits_tensor(tensor)
         scale_bits = self.scale_format.count_bits(
@@ -944,5 +983,9 @@ def quantise_model(model: nn.Module, rules: Iterable[ParameterRule] = []) -> flo
         assert not hasattr(p, "quantisation_format"), "double-quantisation not allowed"
         p.data = format_.quantise(p.data)
         p.quantisation_format = format_  # type:ignore[attr-defined]
-        bitcount += format_.count_bits(p.data.shape)
+        bitcount += (
+            format_.count_bits_tensor(p.data)
+            if isinstance(format_, CompressedTensorFormat)
+            else format_.count_bits(p.data.shape)
+        )
     return bitcount / 8

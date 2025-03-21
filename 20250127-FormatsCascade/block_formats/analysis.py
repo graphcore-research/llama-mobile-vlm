@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
+import scipy.optimize
 import torch
 from torch import Tensor
 
@@ -83,39 +84,32 @@ class Distribution:
             bits, block_size, scaling=scaling, mode=mode, **d, **args
         )
 
-    # def rms_quantiser(
-    #     self,
-    #     bits: float,
-    #     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
-    #     **args: Any
-    # ):
-    #     d = dict(self.__dict__)
-    #     d.pop("scale")
-    #     return dict(
-    #         Normal=Q.crd_normal,
-    #         Laplace=Q.crd_laplace,
-    #         StudentT=Q.crd_t,
-    #     )[
-    #         type(self).__name__
-    #     ](bits, mode=mode, **d, **args)
+    def find_compressed_quantiser(
+        self,
+        bits: int,
+        X: Tensor,
+        X_train: Tensor,
+        scaling: Literal["rms", "absmax", "signmax"] = "rms",
+        block_size: int | None = None,
+        power: float = 0,
+    ) -> Q.CompressedLUTFormat:
+        def _format(b0: float) -> Q.CompressedLUTFormat:
+            if power == 0 and scaling == "rms":
+                amax = X_train.abs().amax()
+                fmt = Q.LUTFormat.create(
+                    torch.linspace(-amax, amax, int(2**b0)), "GRID"
+                )
+            else:
+                fmt = self.quantiser(
+                    b0, power=power, scaling=scaling, block_size=block_size
+                )
+            return Q.CompressedLUTFormat.train(fmt, X_train)
 
-    # def absmax_quantiser(
-    #     self,
-    #     bits: float,
-    #     block_size: int,
-    #     scaling: Literal["absmax", "signmax"] = "absmax",
-    #     mode: Literal["symmetric", "repeat_zero", "asymmetric"] = "symmetric",
-    #     **args: Any
-    # ):
-    #     d = dict(self.__dict__)
-    #     d.pop("scale")
-    #     return dict(
-    #         Normal=Q.crd_block_normal,
-    #         Laplace=Q.crd_block_laplace,
-    #         StudentT=Q.crd_block_t,
-    #     )[type(self).__name__](
-    #         bits, block_size, scaling=scaling, mode=mode, **d, **args
-    #     )
+        opt = scipy.optimize.minimize_scalar(
+            lambda b0: (_format(b0).count_bits_tensor(X) / X.nelement() - bits) ** 2,
+            bounds=(bits, bits + 8),
+        )
+        return _format(opt.x)
 
 
 @dataclass
