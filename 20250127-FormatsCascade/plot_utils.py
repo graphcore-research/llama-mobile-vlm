@@ -10,7 +10,6 @@ import fractions
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
 
 PALETTE = sns.color_palette("Dark2")
@@ -21,6 +20,7 @@ DISPLAY_NAMES = {
     "block_size": "$B$",
     "qrmse_norm": "$R$",
     "LM": "Lloyd-Max",
+    "rms": "RMS",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
 
@@ -81,8 +81,11 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
             "axes.spines.top": False,
             "axes.spines.right": False,
             "legend.edgecolor": "none",
-            "legend.fontsize": "11",
-            "axes.titlesize": "11",
+            "legend.fontsize": 11,
+            "axes.titlesize": 11,
+            "axes.labelsize": 14,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
             "lines.markersize": 3,
         }
     )
@@ -100,13 +103,29 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
         )
 
 
-def share_legend(figure: matplotlib.figure.Figure) -> None:
+def set_figure_legend(
+    figure: matplotlib.figure.Figure,
+    handles: Any = None,
+    labels: Any = None,
+    loc: str = "center left",
+    bbox_to_anchor: tuple[float, float] = (0.98, 0.5),
+    **args: Any,
+) -> None:
+    figure.legend(
+        handles=handles, labels=labels, loc=loc, bbox_to_anchor=bbox_to_anchor, **args
+    )
+    if "left" in loc:
+        extent = figure.legends[0].get_window_extent()
+        figure.set_figwidth(2 * figure.get_figwidth() - extent.x1 / figure.dpi)
+
+
+def share_legend(figure: matplotlib.figure.Figure, **args: Any) -> None:
     handles, labels = figure.axes[00].get_legend_handles_labels()
     for ax in figure.axes:
         assert ax.get_legend_handles_labels()[1] == labels
         if ax.legend_ is not None:
             ax.legend_.remove()
-    figure.legend(handles, labels, loc="center left", bbox_to_anchor=(1, 0.5))
+    set_figure_legend(figure, handles, labels, **args)
 
 
 def tidy(figure: matplotlib.figure.Figure) -> None:
@@ -128,56 +147,40 @@ def tidy(figure: matplotlib.figure.Figure) -> None:
 
 @dataclass
 class Grid:
-    df: pd.DataFrame
-    row: str | None
-    row_values: list[str]
-    col: str | None
-    col_values: list[str]
+    rows: list[str | None]
+    cols: list[str | None]
     axes: np.ndarray[matplotlib.axes.Axes]
     figure: matplotlib.figure.Figure
 
     def __iter__(self) -> Iterable[Any]:
-        """Iterate through ((key,), DataFrame, Axes) tuples."""
-        for row_value, axr in zip(self.row_values, self.axes):
-            for col_value, ax in zip(self.col_values, axr):
-                d, key = self.df, ()
-                if self.row is not None:
-                    key = (*key, row_value)
-                    d = d[d[self.row] == row_value]
-                if self.col is not None:
-                    key = (*key, col_value)
-                    d = d[d[self.col] == col_value]
-                yield (key, d, ax)
+        """Iterate through ((key,), Axes) tuples."""
+        for row, axr in zip(self.rows, self.axes):
+            for col, ax in zip(self.cols, axr):
+                key = ()
+                if row is not None:
+                    key = (*key, row)
+                if col is not None:
+                    key = (*key, col)
+                yield (key, ax)
 
 
 def grid(
-    df: pd.DataFrame,
-    row: str | None = None,
-    col: str | None = None,
+    rows: list[str | None] = [None],
+    cols: list[str | None] = [None],
     sharex: bool = False,
     sharey: bool = False,
 ) -> Grid:
     """Create a grid of matplotlib plots (much like seaborn, but plainer if not simpler)."""
-    row_values = df[row].unique() if row else [None]
-    col_values = df[col].unique() if col else [None]
     figw, figh = matplotlib.rcParams["figure.figsize"]
     figure, axes = plt.subplots(
-        nrows=len(row_values),
-        ncols=len(col_values),
-        figsize=(figw, figh * len(row_values)),
+        nrows=len(rows),
+        ncols=len(cols),
+        figsize=(figw, figh * len(rows)),
         sharex=sharex,
         sharey=sharey,
         squeeze=False,
     )
-    return Grid(
-        df=df,
-        row=row,
-        row_values=row_values,
-        col=col,
-        col_values=col_values,
-        axes=axes,
-        figure=figure,
-    )
+    return Grid(rows=rows, cols=cols, axes=axes, figure=figure)
 
 
 # Paper sync

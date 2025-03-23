@@ -876,6 +876,10 @@ class CompressedLUTFormat(CompressedTensorFormat):
     def __str__(self) -> str:
         return f"{self.lut}+Z[{self.compressor}]"
 
+    @property
+    def range(self) -> tuple[float, float]:
+        return self.lut.range
+
     def quantise(self, tensor: Tensor) -> Tensor:
         return self.lut.quantise(tensor)
 
@@ -929,7 +933,8 @@ class LinearScalingCompressionFormat(LinearScalingFormat):
     """Note: requires self.element_format to be a CompressedFormat."""
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
-        element_bits = self.element_format.count_bits_tensor(tensor)
+        scale = self.scale_for(tensor)
+        element_bits = self.element_format.count_bits_tensor(tensor / scale)
         scale_bits = self.scale_format.count_bits(
             self._scale_shape_for(tensor.shape, self.group_shape)
         )

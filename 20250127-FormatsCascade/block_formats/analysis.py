@@ -95,6 +95,7 @@ class Distribution:
     ) -> Q.CompressedLUTFormat:
         def _format(b0: float) -> Q.CompressedLUTFormat:
             if power == 0 and scaling == "rms":
+                assert block_size is None, "rms scaling doesn't support block size"
                 amax = X_train.abs().amax()
                 fmt = Q.LUTFormat.create(
                     torch.linspace(-amax, amax, int(2**b0)), "GRID"
