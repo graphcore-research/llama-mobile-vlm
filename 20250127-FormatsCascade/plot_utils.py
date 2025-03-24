@@ -21,6 +21,10 @@ DISPLAY_NAMES = {
     "qrmse_norm": "$R$",
     "LM": "Lloyd-Max",
     "rms": "RMS",
+    # Formats
+    "BFLOAT16": r"\texttt{bfloat16}",
+    "EXP8": r"\texttt{E8M0}",
+    "E0M3": r"INT4",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
 
@@ -35,6 +39,10 @@ def format_fraction(max_denominator: int = 10) -> Callable[[float, int], str]:
         return f"$\\frac{{{f.numerator}}}{{{f.denominator}}}$"
 
     return _format
+
+
+def drop_label(args: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in args.items() if k != "label"}
 
 
 def display_name(t: str) -> str:
