@@ -92,6 +92,7 @@ class Distribution:
         scaling: Literal["rms", "absmax", "signmax"] = "rms",
         block_size: int | None = None,
         power: float = 0,
+        compressor: Q.Compressor = "optimal",
     ) -> Q.CompressedLUTFormat:
         def _format(b0: float) -> Q.CompressedLUTFormat:
             if power == 0 and scaling == "rms":
@@ -104,7 +105,7 @@ class Distribution:
                 fmt = self.quantiser(
                     b0, power=power, scaling=scaling, block_size=block_size
                 )
-            return Q.CompressedLUTFormat.train(fmt, X_train)
+            return Q.CompressedLUTFormat.train(fmt, X_train, compressor=compressor)
 
         opt = scipy.optimize.minimize_scalar(
             lambda b0: (_format(b0).count_bits_tensor(X) / X.nelement() - bits) ** 2,

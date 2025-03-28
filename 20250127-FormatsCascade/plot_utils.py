@@ -111,14 +111,36 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
         )
 
 
+def build_legend_handles(*groups_and_titles: list[dict[str, Any]] | str) -> list[Any]:
+    handles = []
+    sep = False
+    for group_or_title in groups_and_titles:
+        if sep:
+            handles.append(matplotlib.patches.Patch(color="none"))
+            sep = False
+        if isinstance(group_or_title, str):
+            handles.append(matplotlib.patches.Patch(color="none", label=group_or_title))
+        else:
+            for *_, args in group_or_title:
+                args = dict(args)
+                args.setdefault("color", "k")
+                handles.append(matplotlib.lines.Line2D([], [], **args))
+            sep = True
+    return handles
+
+
 def set_figure_legend(
     figure: matplotlib.figure.Figure,
     handles: Any = None,
     labels: Any = None,
+    build: list[list[dict[str, Any]] | str] = None,
     loc: str = "center left",
     bbox_to_anchor: tuple[float, float] = (0.98, 0.5),
     **args: Any,
 ) -> None:
+    if build is not None:
+        assert handles is None and labels is None
+        handles = build_legend_handles(*build)
     figure.legend(
         handles=handles, labels=labels, loc=loc, bbox_to_anchor=bbox_to_anchor, **args
     )
@@ -225,6 +247,12 @@ def save_code(fn: Callable[..., Any], push: bool = True) -> None:
     body = [re.sub(r"^    ", "", x) for x in body]
     body = [x for x in body if "# IGNORE" not in x]
     code = "\n".join(body) + "\n"
-    (Path("overleaf/code") / f"{fn.__name__}.py").write_text(code)
+
+    root = Path("overleaf/code")
+    if not root.exists():
+        raise ValueError(
+            f"Couldn't find {root} - please clone the paper into overleaf/"
+        )
+    (root / f"{fn.__name__}.py").write_text(code)
     if push:
         push_to_paper()

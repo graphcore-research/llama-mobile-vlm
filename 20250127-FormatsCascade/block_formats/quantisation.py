@@ -215,6 +215,9 @@ class IntFormat(ScalarFormat):
     bits_: float
     _type: str = "int"
 
+    def __post_init__(self) -> None:
+        self.bits_ = math.log2(round(2.0**self.bits_))
+
     def __str__(self) -> str:
         if int(self.bits_) == self.bits_:
             return f"E0M{self.bits_ - 1:.0f}"
@@ -449,7 +452,7 @@ def lut_lloyd_max(
         # mantissa length, so default to float64
         dtype = torch.float32 if tensor.nelement() <= 2**26 else torch.float64
     tensor = tensor.to(dtype)
-    midpoints = _lloyd_max_init(init, tensor, int(2**bits))
+    midpoints = _lloyd_max_init(init, tensor, int(round(2**bits)))
 
     # K-means iteration
     idx = torch.empty(tensor.shape, device=tensor.device, dtype=torch.int64)
@@ -565,7 +568,7 @@ def crd_normal(
 ) -> LUTFormat:
     """Cube-root-pdf quantisation for Normal-distributed data, rms=1."""
     return crd_quantiser(
-        int(2**bits),
+        int(round(2**bits)),
         scaling="rms",
         mode=mode,
         name="N",
@@ -581,7 +584,7 @@ def crd_laplace(
 ) -> LUTFormat:
     """Cube-root-pdf quantisation for Laplace-distributed data, rms=1."""
     return crd_quantiser(
-        int(2**bits),
+        int(round(2**bits)),
         scaling="rms",
         mode=mode,
         name="L",
@@ -605,7 +608,12 @@ def crd_t(
 
     name_df = f"{df:.0f}" if int(df) == df else str(df)
     return crd_quantiser(
-        int(2**bits), scaling="rms", mode=mode, name=f"T[{name_df}]", icdf=icdf, **args
+        int(round(2**bits)),
+        scaling="rms",
+        mode=mode,
+        name=f"T[{name_df}]",
+        icdf=icdf,
+        **args,
     )
 
 
@@ -623,7 +631,7 @@ def crd_block_normal(
         return scipy.stats.truncnorm.ppf(p, -1 / s, 1 / s, scale=s)
 
     return crd_quantiser(
-        int(2**bits), scaling=scaling, mode=mode, name="N", icdf=icdf, **args
+        int(round(2**bits)), scaling=scaling, mode=mode, name="N", icdf=icdf, **args
     )
 
 
@@ -650,7 +658,7 @@ def crd_block_laplace(
         return _trunclaplace_ppf(p, float(1 / scale), scale=scale)
 
     return crd_quantiser(
-        int(2**bits), scaling=scaling, mode=mode, name="L", icdf=icdf, **args
+        int(round(2**bits)), scaling=scaling, mode=mode, name="L", icdf=icdf, **args
     )
 
 
@@ -682,7 +690,7 @@ def crd_block_t(
 
     name_df = f"{df:.0f}" if int(df) == df else str(df)
     return crd_quantiser(
-        int(2**bits),
+        int(round(2**bits)),
         scaling=scaling,
         mode=mode,
         name=f"T[{name_df}]",
@@ -889,7 +897,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
             log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
             return -self.model_logp[idx].sum().div(log2).item()
         if self.compressor == "bz2":
-            idx_bytes = idx.to(torch.uint32).numpy().tobytes()
+            idx_bytes = idx.to(torch.uint32).cpu().numpy().tobytes()
             return len(bz2.compress(idx_bytes)) * 8
         if self.compressor == "huffman":
             # Note: use freq = p * large-const, since EOF is added with freq=1
@@ -898,7 +906,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
             )
             # We don't count the bits to encode the table, since it's considered
             # fixed (derived from `model_logp` not `tensor`).
-            return len(codec.encode(idx.numpy())) * 8
+            return len(codec.encode(idx.cpu().numpy())) * 8
         raise ValueError(f"Unknown compressor {self.compressor!r}")
 
     @classmethod
