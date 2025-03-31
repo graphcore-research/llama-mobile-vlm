@@ -19,7 +19,6 @@ from typing import (
     cast,
 )
 
-import dahuffman
 import scipy.stats
 import torch
 import tqdm
@@ -866,7 +865,7 @@ class CompressedTensorFormat(TensorFormat):
         )
 
 
-Compressor: TypeAlias = Literal["optimal", "bz2", "huffman"]
+Compressor: TypeAlias = Literal["optimal", "bz2", "huffman", "arithmetic"]
 
 
 @dataclass
@@ -893,13 +892,18 @@ class CompressedLUTFormat(CompressedTensorFormat):
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
         idx = self.lut.to_idx(tensor)
+
         if self.compressor == "optimal":
             log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
             return -self.model_logp[idx].sum().div(log2).item()
+
         if self.compressor == "bz2":
             idx_bytes = idx.to(torch.uint32).cpu().numpy().tobytes()
             return len(bz2.compress(idx_bytes)) * 8
+
         if self.compressor == "huffman":
+            import dahuffman
+
             # Note: use freq = p * large-const, since EOF is added with freq=1
             codec = dahuffman.HuffmanCodec.from_frequencies(
                 {i: p.exp().item() * 2**20 for i, p in enumerate(self.model_logp)}
@@ -907,6 +911,23 @@ class CompressedLUTFormat(CompressedTensorFormat):
             # We don't count the bits to encode the table, since it's considered
             # fixed (derived from `model_logp` not `tensor`).
             return len(codec.encode(idx.cpu().numpy())) * 8
+
+        if self.compressor == "arithmetic":
+            import arithmetic_compressor
+
+            # Clip the minimum probability to avoid numerical issues (empirical threshold)
+            codec = arithmetic_compressor.AECompressor(
+                arithmetic_compressor.models.StaticModel(
+                    {
+                        i: p.exp().clip(min=2e-4).item()
+                        for i, p in enumerate(self.model_logp)
+                    }
+                )
+            )
+            # We don't count the bits to encode the table, since it's considered
+            # fixed (derived from `model_logp` not `tensor`).
+            return len(codec.compress(idx.cpu().numpy()))  # list of bits
+
         raise ValueError(f"Unknown compressor {self.compressor!r}")
 
     @classmethod
