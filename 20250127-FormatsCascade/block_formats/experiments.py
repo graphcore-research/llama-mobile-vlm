@@ -14,11 +14,12 @@ import datasets
 import tqdm
 import torch
 import transformers
-from torch import Tensor, tensor
+from torch import Tensor, tensor, nn
 import wandb
 
 from . import quantisation as Q
 
+PROJECT = "block-number-formats"
 CODE_CHANGES = ("lut-bucketize", "rename-to-block")
 
 
@@ -37,6 +38,10 @@ class Dataset:
     @property
     def device(self) -> torch.device:
         return self.tokens.device
+
+    @property
+    def n_batch(self) -> int:
+        return self.tokens.shape[0]
 
     @property
     def sequence_length(self) -> int:
@@ -71,13 +76,13 @@ class Dataset:
         if token_limit is not None:
             tokens = tokens[:token_limit]
         npad = -len(tokens) % ((sequence_length - 1) * batch_size)
-        tokens_batched = torch.nn.functional.pad(
+        tokens_batched = nn.functional.pad(
             tensor(tokens, dtype=torch.int64, device=device),
             (0, npad),
             value=tokenizer.eos_token_id,
         ).view(-1, batch_size, sequence_length - 1)
 
-        masks = torch.nn.functional.pad(
+        masks = nn.functional.pad(
             torch.ones(len(tokens), dtype=torch.bool, device=device), (0, npad)
         ).view(-1, batch_size, sequence_length - 1)
 
@@ -97,9 +102,7 @@ class Dataset:
                 tokens_batched, topk_indices, topk_logp
             ):
                 logp_ = model(
-                    torch.nn.functional.pad(
-                        tokens_, (1, 0), value=tokenizer.bos_token_id
-                    )
+                    nn.functional.pad(tokens_, (1, 0), value=tokenizer.bos_token_id)
                 ).logits.log_softmax(-1)
                 topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
 
@@ -112,61 +115,76 @@ class Dataset:
             topk_logp=topk_logp,
         )
 
+    def losses(self, model: nn.Module, index: int) -> dict[str, Tensor]:
+        """Return the sum losses for the given batch.
+
+        "cross_entropy" -- over `masks[index].sum()` samples
+
+        "kl_div" -- over `masks[index].sum() + masks[index, :, 0].sum()` samples
+        """
+        tokens = self.tokens[index]
+        mask = self.masks[index]
+        topk_indices = self.topk_indices[index]
+        topk_logp = self.topk_logp[index]
+
+        logits = model(
+            nn.functional.pad(tokens, (1, 0), value=self.bos_token_id)
+        ).logits
+
+        # Cross entropy, over sequence_length-1
+        xent = (
+            nn.functional.cross_entropy(
+                logits[:, :-1].flatten(end_dim=-2),
+                tokens.flatten(),
+                reduction="none",
+            )
+            .float()
+            .mul(mask.flatten())
+            .sum()
+        )
+
+        # KL divergence can use the full sequence length (vs xent, which
+        # uses `sequence_length - 1`)
+        kl_mask = nn.functional.pad(mask.int(), (1, 0), mode="replicate").bool()
+        model_topk_logp = logits.log_softmax(-1).gather(-1, topk_indices)
+
+        # Add a contribution from the tail
+        # Values very close to zero cause numerical issues & exploding KL,
+        # so we clip the tail minimum
+        tail_p = (1 - topk_logp.exp().sum(-1)).clip(min=1e-6)
+        model_tail_p = (1 - model_topk_logp.exp().sum(-1)).clip(min=1e-6)
+        tail_kl = tail_p * (tail_p.log() - model_tail_p.log())
+        kl_div = (
+            topk_logp.exp()
+            .mul(topk_logp - model_topk_logp)
+            .sum(-1)
+            .add(tail_kl)
+            .mul(kl_mask)
+            .sum()
+        )
+
+        return dict(cross_entropy=xent, kl_div=kl_div)
+
 
 def evaluate_model(
     data: Dataset, model: transformers.PreTrainedModel
 ) -> dict[str, float]:
     with torch.no_grad():
-        cross_entropy_sum = tensor(0.0, device=data.device)
+        xent_sum = tensor(0.0, device=data.device)
         kl_sum = tensor(0.0, device=data.device)
-        kl_count = tensor(0, device=data.device, dtype=torch.int64)
-        for tokens, mask, topk_indices, topk_logp in zip(
-            data.tokens, data.masks, data.topk_indices, data.topk_logp
-        ):
-            logits = model(
-                torch.nn.functional.pad(tokens, (1, 0), value=data.bos_token_id)
-            ).logits
-            cross_entropy_sum += (
-                torch.nn.functional.cross_entropy(
-                    logits[:, :-1].flatten(end_dim=-2),
-                    tokens.flatten(),
-                    reduction="none",
-                )
-                .float()
-                .mul(mask.flatten())
-                .sum()
-            )
-
-            # KL divergence can use the full sequence length (vs xent, which
-            # uses `sequence_length - 1`)
-            kl_mask = torch.nn.functional.pad(mask, (1, 0), value=True)
-            model_topk_logp = logits.log_softmax(-1).gather(-1, topk_indices)
-
-            # Values very close to zero cause numerical issues & exploding KL,
-            # so we clip the tail minimum
-            res_p = (1 - topk_logp.exp().sum(-1)).clip(min=1e-6)
-            model_res_p = (1 - model_topk_logp.exp().sum(-1)).clip(min=1e-6)
-            res_kl = res_p * (res_p.log() - model_res_p.log())
-
-            kl_sum += (
-                topk_logp.exp()
-                .mul(topk_logp - model_topk_logp)
-                .sum(-1)
-                .add(res_kl)
-                .mul(kl_mask)
-                .sum()
-            )
-            kl_count += kl_mask.sum()
-
-        cross_entropy = cross_entropy_sum / data.masks.sum()
-        kl_div = kl_sum / kl_count
-        return dict(cross_entropy=cross_entropy.item(), kl_div=kl_div.item())
+        for index in range(data.n_batch):
+            losses = data.losses(model, index)
+            xent_sum += losses["cross_entropy"]
+            kl_sum += losses["kl_div"]
+        xent = xent_sum / data.masks.sum()
+        kl_div = kl_sum / (data.masks.sum() + data.masks[:, :, 0].sum())
+        return dict(cross_entropy=xent.item(), kl_div=kl_div.item())
 
 
 @dataclass
 class RequantisableModel:
     model: transformers.PreTrainedModel
-    original_params: dict[str, torch.nn.Parameter]
+    original_params: dict[str, nn.Parameter]
 
     @classmethod
     def load(
@@ -275,7 +293,7 @@ def run_sweep(xp: Sweep, out: Path) -> None:
                 config["code_changes"] = CODE_CHANGES
                 wandb.init(
                     entity="graphcore",
-                    project="sparse-attention-formats",
+                    project=PROJECT,
                     reinit=True,
                     config=config,
                 )
@@ -444,7 +462,7 @@ def run_weight_stats(xp: StatsExperiment, out: Path) -> None:
             config["code_changes"] = CODE_CHANGES
             wandb.init(
                 entity="graphcore",
-                project="sparse-attention-formats",
+                project=PROJECT,
                 reinit=True,
                 config=config,
             )
