@@ -14,26 +14,7 @@ from . import quantisation as Q
 
 
 def rms(tensor: Tensor) -> Tensor:
-    return tensor.pow(2).mean().sqrt()
-
-
-def rms_normalise(tensor: Tensor) -> Tensor:
-    """Divide a tensor by its RMS."""
-    return tensor / rms(tensor)
-
-
-def block_normalise(
-    tensor: Tensor, scaling: Literal["absmax", "signmax", "rms"], block_size: int | None
-) -> Tensor:
-    """Divide a tensor by its block-absmax (on the last dimension)."""
-    t = tensor.view(-1, block_size) if block_size is not None else tensor.view(-1)
-    t = t.float()
-    norm = dict(
-        absmax=lambda: t.abs().amax(-1),
-        signmax=lambda: torch.where(-t.amin(-1) > t.amax(-1), t.amin(-1), t.amax(-1)),
-        rms=lambda: t.pow(2).mean(-1).sqrt(),
-    )[scaling]()
-    return t.div(norm[..., None]).to(tensor.dtype).view(tensor.shape)
+    return tensor.pow(2).mean(dtype=torch.float32).sqrt().to(tensor.dtype)
 
 
 @dataclass

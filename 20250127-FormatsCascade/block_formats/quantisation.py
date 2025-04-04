@@ -705,16 +705,69 @@ def crd_block_t(
     )
 
 
-# Tensor formats (new)
+# Tensor formats
+
+BlockShape = Tuple[Optional[int], ...]
+Scaling = Literal["absmax", "signmax", "rms"]
+
+
+def block_normalise(
+    tensor: Tensor,
+    block_shape: BlockShape,
+    scaling: Scaling,
+    element_range: tuple[float, float],
+    scale_format: TensorFormat,
+) -> tuple[Tensor, Tuple]:
+    """Normalise the tensor, returning the normalised tensor & scale."""
+
+    def _get_scale(block_tensor: Tensor) -> Tensor:
+        """Reduce over odd dimensions (1, 3, ...) to get the scale."""
+        block_dims = tuple(range(1, block_tensor.ndim, 2))
+        if scaling == "absmax":
+            element_absmax = min(-element_range[0], element_range[1])
+            return (
+                block_tensor.abs()
+                .amax(dim=block_dims, keepdim=True)
+                .div(element_absmax)
+            )
+        if scaling == "signmax":
+            element_signmax = (
+                element_range[0]
+                if -element_range[0] > element_range[1]
+                else element_range[1]
+            )
+            bmin = block_tensor.amin(dim=block_dims, keepdim=True)
+            bmax = block_tensor.amax(dim=block_dims, keepdim=True)
+            return torch.where(-bmin > bmax, bmin, bmax).div(element_signmax)
+        if scaling == "rms":
+            return (
+                block_tensor.pow(2)
+                .mean(dim=block_dims, keepdim=True, dtype=torch.float32)
+                .sqrt()
+                .to(block_tensor.dtype)
+            )
+        assert False, f"unexpected scaling={scaling}"
+
+    blocked_shape = tuple(
+        s
+        for si, bi in zip(tensor.shape, block_shape)
+        for s in ((1, si) if bi is None else (si // bi, bi))
+    )
+    scale = scale_format.quantise(
+        _get_scale(tensor.reshape(blocked_shape))
+        .broadcast_to(blocked_shape)
+        .reshape(tensor.shape)
+    )
+    return tensor / scale, scale
 
 
 @dataclass
 class LinearScalingFormat(TensorFormat):
-    """A group/channel/tensor scaling scheme for tensors.
+    """A block/channel/tensor scaling scheme for tensors.
 
-    group_shape -- size of groups in each dimension
-                   e.g. (1, 8)       input-groups of size 8
-                        (2, 2)       square groups of 2x2 (4 elements)
+    block_shape -- size of blocks in each dimension
+                   e.g. (1, 8)       input-blocks of size 8
+                        (2, 2)       square blocks of 2x2 (4 elements)
                         (1, None)    per-output-channel scaling
                         (None, None) per-tensor scaling
 
@@ -726,77 +779,39 @@ class LinearScalingFormat(TensorFormat):
                        `element_format` has a sensible range to represent such values)
     """
 
-    GroupShape = Tuple[Optional[int], ...]
-
     element_format: ScalarFormat
     scale_format: TensorFormat
-    group_shape: GroupShape
+    block_shape: BlockShape
     scaling: Literal["absmax", "signmax", "rms"]
 
     _type: str = "linear"
 
     def __str__(self) -> str:
-        group = ",".join("*" if g is None else str(g) for g in self.group_shape)
-        return f"{self.element_format}{{{group}:{self.scale_format}:{self.scaling}}}"
+        block = ",".join("*" if g is None else str(g) for g in self.block_shape)
+        return f"{self.element_format}{{{block}:{self.scale_format}:{self.scaling}}}"
 
-    @staticmethod
-    def _group_shape_for(tensor_shape: Shape, group_shape: GroupShape) -> Shape:
-        assert len(tensor_shape) == len(group_shape), f"{tensor_shape} vs {group_shape}"
-        return tuple((t if g is None else g) for t, g in zip(tensor_shape, group_shape))
-
-    @classmethod
-    def _scale_shape_for(cls, tensor_shape: Shape, group_shape: GroupShape) -> Shape:
-        return tuple(
-            t // g
-            for t, g in zip(
-                tensor_shape, cls._group_shape_for(tensor_shape, group_shape)
+    def _count_scale_bits(self, shape: Shape) -> Shape:
+        return self.scale_format.count_bits(
+            tuple(
+                1 if bi is None else si // bi for si, bi in zip(shape, self.block_shape)
             )
         )
 
     def count_bits(self, shape: Shape) -> int:
-        element_bits = self.element_format.count_bits(shape)
-        scale_bits = self.scale_format.count_bits(
-            self._scale_shape_for(shape, self.group_shape)
-        )
-        return element_bits + scale_bits
+        return self.element_format.count_bits(shape) + self._count_scale_bits(shape)
 
-    def _get_scale(self, grouped_tensor: Tensor) -> Tensor:
-        """Reduce over odd dimensions (1, 3, ...) to get the scale."""
-        group_dims = tuple(range(1, grouped_tensor.ndim, 2))
-        if self.scaling == "absmax":
-            element_min, element_max = self.element_format.range
-            absmax = min(-element_min, element_max)
-            return grouped_tensor.abs().div(absmax).amax(dim=group_dims, keepdim=True)
-        if self.scaling == "signmax":
-            element_min, element_max = self.element_format.range
-            signmax = element_min if -element_min > element_max else element_max
-            group_min = grouped_tensor.amin(dim=group_dims, keepdim=True)
-            group_max = grouped_tensor.amax(dim=group_dims, keepdim=True)
-            return torch.where(-group_min > group_max, group_min, group_max).div(
-                signmax
-            )
-        if self.scaling == "rms":
-            return grouped_tensor.pow(2).mean(dim=group_dims, keepdim=True).sqrt()
-        assert False, f"unexpected scaling={self.scaling}"
-
-    def scale_for(self, tensor: Tensor) -> Tensor:
-        """Get the quantised scaling tensor to apply to quantise a given tensor."""
-        group_shape = self._group_shape_for(tensor.shape, self.group_shape)
-        full_grouped_shape = tuple(
-            s
-            for size, group_size in zip(tensor.shape, group_shape)
-            for s in [size // group_size, group_size]
+    def normalise(self, tensor: Tensor) -> tuple[Tensor, Tensor]:
+        return block_normalise(
+            tensor,
+            block_shape=self.block_shape,
+            scaling=self.scaling,
+            element_range=self.element_format.range,
+            scale_format=self.scale_format,
         )
-        scale = (
-            self._get_scale(tensor.reshape(full_grouped_shape))
-            .broadcast_to(full_grouped_shape)
-            .reshape(tensor.shape)
-        )
-        return self.scale_format.quantise(scale)
 
     def quantise(self, tensor: Tensor) -> Tensor:
-        scale = self.scale_for(tensor)
-        return self.element_format.quantise(tensor / scale) * scale
+        scaled_tensor, scale = self.normalise(tensor)
+        return self.element_format.quantise(scaled_tensor) * scale
 
 
 @dataclass
@@ -969,64 +984,11 @@ class LinearScalingCompressionFormat(LinearScalingFormat):
     """Note: requires self.element_format to be a CompressedFormat."""
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
-        scale = self.scale_for(tensor)
-        element_bits = self.element_format.count_bits_tensor(tensor / scale)
-        scale_bits = self.scale_format.count_bits(
-            self._scale_shape_for(tensor.shape, self.group_shape)
-        )
-        return element_bits + scale_bits
+        scaled_tensor, _ = self.normalise(tensor)
+        element_bits = self.element_format.count_bits_tensor(scaled_tensor)
+        return element_bits + self._count_scale_bits(tensor.shape)
 
     def count_bits(self, shape: Shape) -> int:
         raise NotImplementedError(
             "LinearScalingCompressionFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
         )
-
-
-# Model parameters
-
-
-def _match_shape(shape: Shape, pattern: Tuple[Optional[int], ...]) -> bool:
-    return (len(shape) == len(pattern)) and all(
-        p is None or p == s for s, p in zip(shape, pattern)
-    )
-
-
-@dataclass
-class ParameterRule:
-    pattern: Optional[str]
-    shape: Optional[Tuple[Optional[int], ...]]
-    format: TensorFormat
-
-    def match(self, name: str, parameter: Tensor) -> bool:
-        if self.pattern is not None and not re.search(self.pattern, name):
-            return False
-        if self.shape is not None and not _match_shape(parameter.shape, self.shape):
-            return False
-        return True
-
-
-def quantise_model(model: nn.Module, rules: Iterable[ParameterRule] = []) -> float:
-    """In-place quantise a model, returning the size of the quantised model (bytes).
-
-    rules -- an ordered list or rules. For the first rule which matches `pattern` and
-             `shape` (if specified), use the given quantisation format.
-             If no rule matches, use a `TorchFormat` with the existing parameter type
-             (no quantisation).
-    """
-    bitcount = 0
-    for name, p in model.named_parameters():
-        for rule in rules:
-            if rule.match(name, p):
-                format_ = rule.format
-                break
-        else:
-            format_ = TorchFormat(p.dtype)
-        assert not hasattr(p, "quantisation_format"), "double-quantisation not allowed"
-        p.data = format_.quantise(p.data)
-        p.quantisation_format = format_  # type:ignore[attr-defined]
-        bitcount += (
-            format_.count_bits_tensor(p.data)
-            if isinstance(format_, CompressedTensorFormat)
-            else format_.count_bits(p.data.shape)
-        )
-    return bitcount / 8

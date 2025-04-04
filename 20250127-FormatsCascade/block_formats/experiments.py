@@ -30,14 +30,14 @@ def fit_scaled_rms_quantiser(
     tensor: Tensor,
     bits: float,
     distribution: Literal["uniform", "normal", "laplace", "t"],
-    group_shape: Q.LinearScalingFormat.GroupShape,
+    block_shape: Q.BlockShape,
     **args: Any,
 ) -> Q.TensorFormat:
     """Search for an RMSE-optimal scaled quantiser, to be wrapped in LinearScalingFormat()."""
 
-    tensor = tensor / Q.LinearScalingFormat(
-        Q.FP32, Q.FP32, group_shape, scaling="rms"
-    ).scale_for(tensor)
+    tensor, _ = Q.block_normalise(
+        tensor, block_shape, scaling="rms", element_range=(-1, 1), scale_format=Q.FP32
+    )
     scale_range = torch.tensor([1 / 8, 8])
 
     if distribution in ("uniform", "normal", "laplace"):
@@ -50,9 +50,7 @@ def fit_scaled_rms_quantiser(
             fmt, base_scale = Q.crd_laplace(bits, **args), 1.0
 
         scale = scipy.optimize.minimize_scalar(
-            lambda s: Q.rmse_norm(
-                tensor, Q.ScaledFormat(fmt, s).quantise(tensor)
-            ).item(),
+            lambda s: Q.qrmse_norm(Q.ScaledFormat(fmt, s), tensor).item(),
             bounds=(base_scale * scale_range).tolist(),
             options=dict(xatol=0.1),
         ).x
@@ -65,7 +63,7 @@ def fit_scaled_rms_quantiser(
 
         return fmt(
             scipy.optimize.minimize(
-                lambda a: Q.rmse_norm(tensor, fmt(a).quantise(tensor)).item(),
+                lambda a: Q.qrmse_norm(fmt(a), tensor).item(),
                 [log2(10), 1.0],
                 bounds=((log2(3), log2(100)), scale_range),
                 method="Nelder-Mead",

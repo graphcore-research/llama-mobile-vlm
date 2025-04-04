@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from .. import sensitivity
+from .. import sensitivity as S
 
 
 def test_linear_grad_sq_wrapper() -> None:
@@ -14,5 +14,5 @@ def test_linear_grad_sq_wrapper() -> None:
     torch.testing.assert_close(layer.weight.grad, torch.zeros(2, 2))
 
     layer.zero_grad()
-    sensitivity.LinearGradSqWrapper(layer)(x).backward(grady)
+    S.LinearGradSqWrapper(layer)(x).backward(grady)
     torch.testing.assert_close(layer.weight.grad, torch.full((2, 2), 4.0))
