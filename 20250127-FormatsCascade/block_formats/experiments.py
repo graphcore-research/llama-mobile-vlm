@@ -7,20 +7,73 @@ import json
 import sys
 import traceback
 from dataclasses import dataclass
+from math import log2
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import datasets
-import tqdm
+import scipy.optimize
 import torch
+import tqdm
 import transformers
-from torch import Tensor, tensor, nn
+from torch import Tensor, nn, tensor
+
 import wandb
 
 from . import quantisation as Q
 
 PROJECT = "block-number-formats"
 CODE_CHANGES = ("lut-bucketize", "rename-to-block")
+
+
+def fit_scaled_rms_quantiser(
+    tensor: Tensor,
+    bits: float,
+    distribution: Literal["uniform", "normal", "laplace", "t"],
+    group_shape: Q.LinearScalingFormat.GroupShape,
+    **args: Any,
+) -> Q.TensorFormat:
+    """Search for an RMSE-optimal scaled quantiser, to be wrapped in LinearScalingFormat()."""
+
+    tensor = tensor / Q.LinearScalingFormat(
+        Q.FP32, Q.FP32, group_shape, scaling="rms"
+    ).scale_for(tensor)
+    scale_range = torch.tensor([1 / 8, 8])
+
+    if distribution in ("uniform", "normal", "laplace"):
+        if distribution == "uniform":
+            fmt = Q.IntFormat(bits)
+            base_scale = 3**0.5 / fmt.range[1]
+        if distribution == "normal":
+            fmt, base_scale = Q.crd_normal(bits, **args), 1.0
+        if distribution == "laplace":
+            fmt, base_scale = Q.crd_laplace(bits, **args), 1.0
+
+        scale = scipy.optimize.minimize_scalar(
+            lambda s: Q.rmse_norm(
+                tensor, Q.ScaledFormat(fmt, s).quantise(tensor)
+            ).item(),
+            bounds=(base_scale * scale_range).tolist(),
+            options=dict(xatol=0.1),
+        ).x
+        return Q.ScaledFormat(fmt, scale)
+
+    if distribution == "t":
+
+        def fmt(a: tuple[float, float]) -> Q.TensorFormat:
+            return Q.ScaledFormat(Q.crd_t(bits, 2 ** a[0], **args), a[1])
+
+        return fmt(
+            scipy.optimize.minimize(
+                lambda a: Q.rmse_norm(tensor, fmt(a).quantise(tensor)).item(),
+                [log2(10), 1.0],
+                bounds=((log2(3), log2(100)), scale_range),
+                method="Nelder-Mead",
+                tol=1e-3,
+            ).x
+        )
+
+    raise ValueError(f"Unexpected distribution {distribution}")
 
 
 ### token_prediction

@@ -36,11 +36,6 @@ def block_normalise(
     return t.div(norm[..., None]).to(tensor.dtype).view(tensor.shape)
 
 
-def qrmse_norm(fmt: Q.TensorFormat, tensor: Tensor) -> Tensor:
-    """RMS error of quantisation, normalised by original tensor RMS."""
-    return Q.rmse_norm(tensor, fmt.quantise(tensor))
-
-
 @dataclass
 class Distribution:
     def torch_distribution(

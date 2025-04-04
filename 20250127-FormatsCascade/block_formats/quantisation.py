@@ -37,12 +37,19 @@ def shuffle(t: Tensor) -> Tensor:
 
 
 def rmse_norm(x: Tensor, qx: Tensor) -> Tensor:
+    """RMS error of quantisation, normalised by original tensor RMS."""
     x = x.float()
     qx = qx.float()
     return ((qx - x).pow(2).sum() / x.pow(2).sum()).sqrt()
 
 
+def qrmse_norm(fmt: "TensorFormat", tensor: Tensor) -> Tensor:
+    """RMS error of quantisation, normalised by original tensor RMS."""
+    return rmse_norm(tensor, fmt.quantise(tensor))
+
+
 def snr(x: Tensor, qx: Tensor) -> Tensor:
+    """Signal-to-noise ratio."""
     x = x.float()
     qx = qx.float()
     return x.pow(2).sum() / (qx - x).pow(2).sum()
@@ -939,7 +946,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
         compressor: Compressor = "optimal",
     ) -> "CompressedLUTFormat":
         counts = (
-            lut.to_idx(data)
+            lut.to_idx(data.flatten())
             .bincount(minlength=len(lut.values))
             .to(data.dtype)
             .add_(smoothing)
