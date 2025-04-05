@@ -26,54 +26,6 @@ PROJECT = "block-number-formats"
 CODE_CHANGES = ("lut-bucketize", "rename-to-block")
 
 
-def fit_scaled_rms_quantiser(
-    tensor: Tensor,
-    bits: float,
-    distribution: Literal["uniform", "normal", "laplace", "t"],
-    block_shape: Q.BlockShape,
-    **args: Any,
-) -> Q.TensorFormat:
-    """Search for an RMSE-optimal scaled quantiser, to be wrapped in LinearScalingFormat()."""
-
-    tensor, _ = Q.block_normalise(
-        tensor, block_shape, scaling="rms", element_range=(-1, 1), scale_format=Q.FP32
-    )
-    scale_range = torch.tensor([1 / 8, 8])
-
-    if distribution in ("uniform", "normal", "laplace"):
-        if distribution == "uniform":
-            fmt = Q.IntFormat(bits)
-            base_scale = 3**0.5 / fmt.range[1]
-        if distribution == "normal":
-            fmt, base_scale = Q.crd_normal(bits, **args), 1.0
-        if distribution == "laplace":
-            fmt, base_scale = Q.crd_laplace(bits, **args), 1.0
-
-        scale = scipy.optimize.minimize_scalar(
-            lambda s: Q.qrmse_norm(Q.ScaledFormat(fmt, s), tensor).item(),
-            bounds=(base_scale * scale_range).tolist(),
-            options=dict(xatol=0.1),
-        ).x
-        return Q.ScaledFormat(fmt, scale)
-
-    if distribution == "t":
-
-        def fmt(a: tuple[float, float]) -> Q.TensorFormat:
-            return Q.ScaledFormat(Q.crd_t(bits, 2 ** a[0], **args), a[1])
-
-        return fmt(
-            scipy.optimize.minimize(
-                lambda a: Q.qrmse_norm(fmt(a), tensor).item(),
-                [log2(10), 1.0],
-                bounds=((log2(3), log2(100)), scale_range),
-                method="Nelder-Mead",
-                tol=1e-3,
-            ).x
-        )
-
-    raise ValueError(f"Unexpected distribution {distribution}")
-
-
 ### token_prediction
 
 

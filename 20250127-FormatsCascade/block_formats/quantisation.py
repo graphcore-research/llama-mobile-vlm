@@ -67,6 +67,9 @@ class TensorFormat:
     def count_bits(self, shape: Shape) -> int:
         raise NotImplementedError
 
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        return self.count_bits(tensor.shape)
+
 
 # Scalar formats
 
@@ -782,7 +785,7 @@ class LinearScalingFormat(TensorFormat):
     element_format: ScalarFormat
     scale_format: TensorFormat
     block_shape: BlockShape
-    scaling: Literal["absmax", "signmax", "rms"]
+    scaling: Scaling
 
     _type: str = "linear"
 
@@ -878,8 +881,7 @@ class ChannelAndSparseFormat(TensorFormat):
 
 class CompressedTensorFormat(TensorFormat):
     def count_bits_tensor(self, tensor: Tensor) -> float:
-        log2 = torch.tensor(2, device=tensor.device, dtype=tensor.dtype).log()
-        return -self.model_logp[self._to_idx(tensor)].sum().div(log2).item()
+        raise NotImplementedError()
 
     def count_bits(self, shape: Shape) -> int:
         raise NotImplementedError(

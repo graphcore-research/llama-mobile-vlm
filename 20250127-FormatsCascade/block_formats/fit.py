@@ -1,0 +1,133 @@
+# Copyright (c) 2025 Graphcore Ltd. All rights reserved.
+
+"""A wrapper of `quantisation` to automatically fit quantisers to data."""
+
+from math import log2
+from typing import Any, Literal
+
+import scipy.optimize
+import torch
+from torch import Tensor
+
+from . import quantisation as Q
+
+
+def fit_scale(
+    tensor: Tensor,
+    format: Q.TensorFormat,
+    base_scale: float,
+    bounds: tuple[float, float] = (1 / 16, 16),
+) -> Q.ScaledFormat:
+    """Wrap `format` in a `ScaledFormat` that is tuned to optimise RMSE."""
+
+    fmt = lambda log_s: Q.ScaledFormat(format, 2**log_s)
+    opt = scipy.optimize.minimize_scalar(
+        lambda log_s: Q.qrmse_norm(fmt(log_s), tensor).item(),
+        bounds=(log2(base_scale * bounds[0]), log2(base_scale * bounds[1])),
+        options=dict(xatol=0.1),
+    )
+    return fmt(opt.x)
+
+
+def scaled_quantiser(
+    tensor: Tensor,
+    element_bits: float,
+    element_family: Literal["int", "fp", "normal", "laplace", "t", "lloyd_max"],
+    scale_format: Q.TensorFormat,
+    block_shape: Q.BlockShape,
+    scaling: Q.Scaling,
+    compressor: Q.Compressor | None,
+    args: dict[str, Any] = {},
+) -> Q.TensorFormat:
+    """Fit a scaled quantiser to the given tensor."""
+
+    if compressor is not None:
+        assert (
+            element_family == "int"
+        ), 'scaled_quantiser only supports compression with element_family="int"'
+
+        # Search to find the grid resolution matching the target `element_bits`
+        tensor, _ = Q.block_normalise(
+            tensor,
+            block_shape,
+            scaling,
+            element_range=(-1, 1),
+            scale_format=scale_format,
+        )
+        # Note: don't use train_grid, since it rounds up the element range > absmax,
+        # which causes problems with block-absmax scaling
+        amax = tensor.abs().max() if scaling == "rms" else 1
+        fmt = lambda b: Q.CompressedLUTFormat.train(
+            Q.LUTFormat.create(
+                torch.linspace(-amax, amax, round(2**b)), f"GRID{{n={round(2**b):.0f}}}"
+            ),
+            tensor,
+            compressor=compressor,
+        )
+        opt = scipy.optimize.minimize_scalar(
+            lambda b: abs(
+                fmt(b).count_bits_tensor(tensor) / tensor.nelement() - element_bits
+            ),
+            # Note: +16 is for heavy-tailed distributions (fits Student-t, df >= 2)
+            bounds=(element_bits, element_bits + 16),
+            options=dict(xatol=0.01),
+        )
+        return Q.LinearScalingCompressionFormat(
+            fmt(opt.x), scale_format, block_shape, scaling
+        )
+
+    tensor, _ = Q.block_normalise(
+        tensor,
+        block_shape,
+        scaling,
+        element_range=(
+            Q.IntFormat(element_bits).range if element_family == "int" else (-1, 1)
+        ),
+        scale_format=scale_format,
+    )
+    if element_family == "lloyd_max":
+        args = args.copy()
+        args.setdefault("init", "kmeans++" if scaling == "rms" else "uniform_minmax")
+        args.setdefault("threshold", 1e-4)
+        element_format = Q.lut_lloyd_max(tensor, element_bits, **args)
+    else:
+        if scaling == "rms":
+            base_scale = (
+                3**0.5 / Q.IntFormat(element_bits).range[1]
+                if element_family == "int"
+                else 1.0
+            )
+            _fit_scale = lambda fmt: fit_scale(tensor, fmt, base_scale)
+        else:
+            _fit_scale = lambda fmt: fmt
+
+        if element_family in ("int", "normal", "laplace"):
+            # No hyperparameters, except scale
+            element_format = _fit_scale(
+                dict(int=Q.IntFormat, normal=Q.crd_normal, laplace=Q.crd_laplace)[
+                    element_family
+                ](element_bits, **args)
+            )
+
+        elif element_family == "fp":
+            # Exhaustive search over exponents
+            fmts = [
+                _fit_scale(Q.FPFormat(e, element_bits - e - 1, "nearest"))
+                for e in range(2, element_bits)
+            ]
+            element_format = min(fmts, key=lambda fmt: Q.qrmse_norm(fmt, tensor).item())
+
+        elif element_family == "t":
+            # 1D search over df
+            fmt = lambda log2df: _fit_scale(Q.crd_t(element_bits, 2**log2df, **args))
+            opt = scipy.optimize.minimize_scalar(
+                lambda log2df: Q.qrmse_norm(fmt(log2df), tensor).item(),
+                bounds=(log2(3), log2(100)),
+                options=dict(xatol=0.1),
+            )
+            element_format = fmt(opt.x)
+
+        else:
+            assert False, f"unexpected element_family {element_family!r}"
+
+    return Q.LinearScalingFormat(element_format, scale_format, block_shape, scaling)
