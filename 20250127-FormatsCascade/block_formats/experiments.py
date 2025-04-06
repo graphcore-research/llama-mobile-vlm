@@ -7,12 +7,10 @@ import json
 import sys
 import traceback
 from dataclasses import dataclass
-from math import log2
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable
 
 import datasets
-import scipy.optimize
 import torch
 import tqdm
 import transformers
@@ -21,9 +19,10 @@ from torch import Tensor, nn, tensor
 import wandb
 
 from . import quantisation as Q
+from . import fit as F
 
 PROJECT = "block-number-formats"
-CODE_CHANGES = ("lut-bucketize", "rename-to-block")
+CODE_CHANGES = ("lut-bucketize", "rename-to-block", "sequence-losses")
 
 
 ### token_prediction
@@ -33,10 +32,13 @@ CODE_CHANGES = ("lut-bucketize", "rename-to-block")
 class Dataset:
     name: str
     tokens: Tensor  # (n_batch, batch_size, sequence_length - 1; int64)
-    masks: Tensor  # (n_batch, batch_size, sequence_length - 1; bool)
+    masks: Tensor  # (n_batch, batch_size; bool)
     bos_token_id: int
     topk_indices: Tensor  # (n_batch, batch_size, sequence_length, kl_topk; int64)
     topk_logp: Tensor  # (n_batch, batch_size, sequence_length, kl_topk; float32)
+
+    def __repr__(self) -> str:
+        return f"Dataset({self.name}, ({self.n_batch}, {self.batch_size}, {self.sequence_length}))"
 
     @property
     def device(self) -> torch.device:
@@ -45,6 +47,10 @@ class Dataset:
     @property
     def n_batch(self) -> int:
         return self.tokens.shape[0]
+
+    @property
+    def batch_size(self) -> int:
+        return self.tokens.shape[1]
 
     @property
     def sequence_length(self) -> int:
@@ -61,35 +67,50 @@ class Dataset:
         sequence_length: int,
         batch_size: int,
         kl_topk: int,
-        token_limit: int | None = None,
+        sequence_limit: int | None = None,
+        seed: int = 120081,
     ) -> "Dataset":
-        """Load and tokenize the dataset, then use the model to provide reference logits.
+        """Load and tokenize the dataset, then use the model to provide reference logits."""
 
-        (Note topk_indices and topk_logp will be filled with dummy data.)
-        """
         dataset_name = ("Salesforce/wikitext", "wikitext-2-raw-v1")
         (device,) = set(p.device for p in model.parameters())
         data = datasets.load_dataset(*dataset_name, split="test")["text"]
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model.config._name_or_path
         )
-        tokens = [
+        flat_tokens = [
             t for d in data for t in tokenizer(d, add_special_tokens=False).input_ids
         ]
-        if token_limit is not None:
-            tokens = tokens[:token_limit]
-        npad = -len(tokens) % ((sequence_length - 1) * batch_size)
-        tokens_batched = nn.functional.pad(
-            tensor(tokens, dtype=torch.int64, device=device),
-            (0, npad),
-            value=tokenizer.eos_token_id,
-        ).view(-1, batch_size, sequence_length - 1)
 
-        masks = nn.functional.pad(
-            torch.ones(len(tokens), dtype=torch.bool, device=device), (0, npad)
-        ).view(-1, batch_size, sequence_length - 1)
+        # Trim any final incomplete sequence and create sequences
+        flat_tokens = flat_tokens[
+            : len(flat_tokens) // (sequence_length - 1) * (sequence_length - 1)
+        ]
+        tokens = tensor(flat_tokens, dtype=torch.int64, device=device).view(
+            -1, sequence_length - 1
+        )
 
-        n_batch = tokens_batched.shape[0]
+        # Shuffle & truncate
+        idx = torch.randperm(
+            tokens.shape[0],
+            generator=torch.Generator(device).manual_seed(seed),
+            device=device,
+        )
+        tokens = tokens[idx]
+        if sequence_limit is not None:
+            tokens = tokens[:sequence_limit]
+        n_sequence = tokens.shape[0]
+
+        # Pad and batch
+        tokens = nn.functional.pad(
+            tokens, (0, 0, 0, -n_sequence % batch_size), value=tokenizer.eos_token_id
+        ).view(-1, batch_size, sequence_length - 1)
+        n_batch = tokens.shape[0]
+        masks = (torch.arange(n_batch * batch_size) < n_sequence).view(
+            n_batch, batch_size
+        )
+
+        # Run `model` to get topk_indices, topk_logp
         topk_indices = torch.zeros(
             (n_batch, batch_size, sequence_length, kl_topk),
             device=device,
@@ -102,7 +123,7 @@ class Dataset:
         )
         with torch.no_grad():
             for tokens_, topk_indices_, topk_logp_ in zip(
-                tokens_batched, topk_indices, topk_logp
+                tokens, topk_indices, topk_logp
             ):
                 logp_ = model(
                     nn.functional.pad(tokens_, (1, 0), value=tokenizer.bos_token_id)
@@ -111,25 +132,22 @@ class Dataset:
 
         return cls(
             name=":".join(dataset_name),
-            tokens=tokens_batched,
+            tokens=tokens,
             masks=masks,
             bos_token_id=tokenizer.bos_token_id,
             topk_indices=topk_indices,
             topk_logp=topk_logp,
         )
 
-    def losses(self, model: nn.Module, index: int) -> dict[str, Tensor]:
-        """Return the sum losses for the given batch.
+    def batch_losses(self, model: nn.Module, index: int) -> dict[str, Tensor]:
+        """Return the average (per-token) loss for each (non-masked) sequence in the batch.
 
-        "cross_entropy" -- over `masks[index].sum()` samples
+        "cross_entropy" -- (n_sequence,)
 
-        "kl_div" -- over `masks[index].sum() + masks[index, :, 0].sum()` samples
+        "kl_div" -- (n_sequence,)
         """
         tokens = self.tokens[index]
         mask = self.masks[index]
-        topk_indices = self.topk_indices[index]
-        topk_logp = self.topk_logp[index]
-
         logits = model(
             nn.functional.pad(tokens, (1, 0), value=self.bos_token_id)
         ).logits
@@ -141,15 +159,14 @@ class Dataset:
                 tokens.flatten(),
                 reduction="none",
             )
-            .float()
-            .mul(mask.flatten())
-            .sum()
+            .view(tokens.shape[-2:])
+            .mean(-1, dtype=torch.float32)[mask]
         )
 
-        # KL divergence can use the full sequence length (vs xent, which
-        # uses `sequence_length - 1`)
-        kl_mask = nn.functional.pad(mask.int(), (1, 0), mode="replicate").bool()
-        model_topk_logp = logits.log_softmax(-1).gather(-1, topk_indices)
+        # KL divergence using the reference model's topk + tail
+        topk_indices = self.topk_indices[index]
+        topk_logp = self.topk_logp[index].float()
+        model_topk_logp = logits.log_softmax(-1).gather(-1, topk_indices).float()
 
         # Add a contribution from the tail
         # Values very close to zero cause numerical issues & exploding KL,
@@ -157,35 +174,32 @@ class Dataset:
         tail_p = (1 - topk_logp.exp().sum(-1)).clip(min=1e-6)
         model_tail_p = (1 - model_topk_logp.exp().sum(-1)).clip(min=1e-6)
         tail_kl = tail_p * (tail_p.log() - model_tail_p.log())
+
         kl_div = (
             topk_logp.exp()
             .mul(topk_logp - model_topk_logp)
             .sum(-1)
             .add(tail_kl)
-            .mul(kl_mask)
-            .sum()
+            .mean(-1)[mask]
         )
-
         return dict(cross_entropy=xent, kl_div=kl_div)
 
+    def evaluate(self, model: transformers.PreTrainedModel) -> dict[str, float]:
+        with torch.no_grad():
+            losses = [self.batch_losses(model, i) for i in range(self.n_batch)]
+            return {k: torch.concat([x[k] for x in losses]) for k in losses[0]}
 
-def evaluate_model(
-    data: Dataset, model: transformers.PreTrainedModel
-) -> dict[str, float]:
-    with torch.no_grad():
-        xent_sum = tensor(0.0, device=data.device)
-        kl_sum = tensor(0.0, device=data.device)
-        for index in range(data.n_batch):
-            losses = data.losses(model, index)
-            xent_sum += losses["cross_entropy"]
-            kl_sum += losses["kl_div"]
-        xent = xent_sum / data.masks.sum()
-        kl_div = kl_sum / (data.masks.sum() + data.masks[:, :, 0].sum())
-        return dict(cross_entropy=xent.item(), kl_div=kl_div.item())
+
+# Maps parameter name (or a default "") to quantisation format or fit spec
+ModelFormats = dict[str, Q.TensorFormat | F.Scaled]
 
 
 @dataclass
 class RequantisableModel:
+    """Wraps transformers.PreTrainedModel, storing original parameters on CPU,
+    so that they can be restored when needed.
+    """
+
     model: transformers.PreTrainedModel
     original_params: dict[str, nn.Parameter]
 
@@ -210,29 +224,51 @@ class RequantisableModel:
         for name, p in self.model.state_dict().items():
             p[...] = self.original_params[name].to(p.device)
 
-    def quantise(self, format: Q.TensorFormat) -> list[dict[str, str | bool | float]]:
+    def quantise(self, formats: ModelFormats) -> list[dict[str, Any]]:
+        """Quantise parameters of the model, returning a log of the outcomes.
+
+        formats -- dict[ParamName, Quantiser]
+
+            Tries `formats[param_name] or formats[""]`, if neither is found, the parameter
+            is unquantised.
+
+            Quantiser can be a Q.TensorFormat, which is used directly or an F.Scaled which
+            is first fitted to each tensor being quantised
+
+        returns -- list[ParamRecord] -- records bits, quantisation error etc.
+        """
         log = []
         for name, p in self.model.state_dict().items():
             if p.ndim == 2:
                 p0 = self.original_params[name].to(p.device)
-                p[...] = format.quantise(p0)
-                log.append(
-                    dict(
-                        name=name,
-                        quantised=True,
-                        rmse=(p - p0).float().pow(2).mean().sqrt().item(),
-                        snr=Q.snr(p0, p).item(),
-                        bits=format.count_bits(p.shape),
+                fmt_or_fit = formats.get(name, formats.get(""))
+                if fmt_or_fit:
+                    if isinstance(fmt_or_fit, Q.TensorFormat):
+                        fmt = fmt_or_fit
+                    elif isinstance(fmt_or_fit, F.Scaled):
+                        fmt = fmt_or_fit.fit(p0)
+                    p[...] = fmt.quantise(p0)
+                    log.append(
+                        dict(
+                            name=name,
+                            quantised=True,
+                            nelement=p.nelement(),
+                            bits=fmt.count_bits_tensor(p),
+                            rmse=(p - p0).float().pow(2).mean().sqrt().item(),
+                            norm=p0.float().pow(2).mean().sqrt().item(),
+                            fmt=dataclasses.asdict(fmt),
+                            fmt_str=str(fmt),
+                        )
                     )
+                    continue
+            log.append(
+                dict(
+                    name=name,
+                    quantised=False,
+                    nelement=p.nelement(),
+                    bits=Q.TorchFormat(p.dtype).count_bits(p.shape),
                 )
-            else:
-                log.append(
-                    dict(
-                        name=name,
-                        quantised=False,
-                        bits=Q.TorchFormat(p.dtype).count_bits(p.shape),
-                    )
-                )
+            )
         return log
 
 
@@ -247,13 +283,13 @@ TEST_MODELS = [
 
 
 @dataclass
-class Sweep:
+class TokenPredictionSweep:
     experiment: str
-    formats: list[Q.TensorFormat]
+    formats: list[ModelFormats]
     sequence_length: int = 4096
     kl_topk: int = 128
     batch_size: int = 1
-    data_max_tokens: int | None = None
+    sequence_limit: int | None = None
     models: list[str] = dataclasses.field(default_factory=lambda: TEST_MODELS.copy())
     device: torch.device = dataclasses.field(
         default_factory=lambda: torch.device(
@@ -261,62 +297,74 @@ class Sweep:
         )
     )
 
-
-def run_sweep(xp: Sweep, out: Path) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        raise ValueError(f"Output log {out} already exists - please delete first")
-    with out.open("w") as outf:
-        for i, model_name in enumerate(xp.models):
-            model = RequantisableModel.load(
-                model_name, device=xp.device, dtype=torch.bfloat16
-            )
-            n_params = sum(p.nelement() for p in model.model.parameters())
-            data = Dataset.load_wikitext2(
-                model.model,
-                sequence_length=xp.sequence_length,
-                batch_size=xp.batch_size,
-                kl_topk=xp.kl_topk,
-                token_limit=xp.data_max_tokens,
-            )
-            for j, format in enumerate(xp.formats):
-                print(
-                    f"-- model {i+1}/{len(xp.models)}, format {j+1}/{len(xp.formats)}",
-                    file=sys.stderr,
+    def run(self, out: Path) -> None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            raise ValueError(f"Output log {out} already exists - please delete first")
+        with out.open("w") as outf:
+            for i, model_name in enumerate(self.models):
+                model = RequantisableModel.load(
+                    model_name, device=self.device, dtype=torch.bfloat16
                 )
-                config = xp.__dict__.copy()
-                config["test"] = "token_prediction"
-                config["dataset"] = data.name
-                del config["models"]
-                config["model"] = model_name
-                del config["formats"]
-                config["format"] = dataclasses.asdict(format)
-                config["format_str"] = str(format)
-                config["device"] = config["device"].type
-                config["code_changes"] = CODE_CHANGES
-                wandb.init(
-                    entity="graphcore",
-                    project=PROJECT,
-                    reinit=True,
-                    config=config,
+                n_params = sum(p.nelement() for p in model.model.parameters())
+                data = Dataset.load_wikitext2(
+                    model.model,
+                    sequence_length=self.sequence_length,
+                    batch_size=self.batch_size,
+                    kl_topk=self.kl_topk,
+                    sequence_limit=self.sequence_limit,
                 )
-                outcome = dict(n_tokens=data.masks.sum().item(), n_params=n_params)
-                try:
-                    log = model.quantise(format)
-                    outcome.update(
-                        weights={d.pop("name"): d for d in log},
-                        bits_per_param=sum(d["bits"] for d in log) / n_params,
+                for j, mformats in enumerate(self.formats):
+                    print(
+                        f"-- model {i+1}/{len(self.models)}, format {j+1}/{len(self.formats)}",
+                        file=sys.stderr,
                     )
-                    outcome.update(evaluate_model(data, model.model))
-                except Exception as exc:
-                    print(repr(exc), file=sys.stderr)
-                    outcome.update(error=repr(exc), backtrace=traceback.format_exc())
-                finally:
-                    print(json.dumps(dict(**config, **outcome)), file=outf, flush=True)
-                    wandb.summary.update(outcome)
-                    wandb.finish(1 if "error" in outcome else 0)
-            del model
-            del data
+                    config = self.__dict__.copy()
+                    config["test"] = "token_prediction"
+                    config["dataset"] = data.name
+                    del config["models"]
+                    config["model"] = model_name
+                    del config["formats"]
+                    config["format"] = {
+                        k: dataclasses.asdict(v) for k, v in mformats.items()
+                    }
+                    config["format_str"] = {k: str(v) for k, v in mformats.items()}
+                    config["device"] = config["device"].type
+                    config["code_changes"] = CODE_CHANGES
+                    wandb.init(
+                        entity="graphcore",
+                        project=PROJECT,
+                        reinit=True,
+                        config=config,
+                    )
+                    outcome = dict(
+                        n_sequences=data.masks.sum().item(),
+                        n_params=n_params,
+                    )
+                    try:
+                        log = model.quantise(mformats)
+                        metrics = data.evaluate(model.model)
+                        metrics.update(
+                            {f"{k}_mean": v.mean() for k, v in metrics.items()}
+                        )
+                        outcome.update(
+                            params={d.pop("name"): d for d in log},
+                            bits_per_param=sum(d["bits"] for d in log) / n_params,
+                            **{k: v.tolist() for k, v in metrics.items()},
+                        )
+                    except Exception as exc:
+                        print(repr(exc), file=sys.stderr)
+                        outcome.update(
+                            error=repr(exc), backtrace=traceback.format_exc()
+                        )
+                    finally:
+                        print(
+                            json.dumps(dict(**config, **outcome)), file=outf, flush=True
+                        )
+                        wandb.summary.update(outcome)
+                        wandb.finish(1 if "error" in outcome else 0)
+                del model
+                del data
 
 
 ### weight_stats
@@ -437,7 +485,7 @@ def tensor_stats(w: Tensor) -> dict[str, Any]:
 
 
 @dataclass
-class StatsExperiment:
+class WeightStatsSweep:
     experiment: str
     models: list[str] = dataclasses.field(default_factory=lambda: TEST_MODELS.copy())
     device: torch.device = dataclasses.field(
@@ -446,38 +494,37 @@ class StatsExperiment:
         )
     )
 
-
-def run_weight_stats(xp: StatsExperiment, out: Path) -> None:
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        raise ValueError(f"Output log {out} already exists - please delete first")
-    with out.open("w") as outf:
-        for i, model_name in enumerate(xp.models):
-            print(f"-- model {i+1}/{len(xp.models)}", file=sys.stderr)
-            model = transformers.AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=torch.bfloat16
-            )
-            config = xp.__dict__.copy()
-            config["test"] = "weight_stats"
-            del config["models"]
-            config["model"] = model_name
-            config["device"] = config["device"].type
-            config["code_changes"] = CODE_CHANGES
-            wandb.init(
-                entity="graphcore",
-                project=PROJECT,
-                reinit=True,
-                config=config,
-            )
-            outcome = dict(
-                weight_stats={
-                    name: tensor_stats(p.to(xp.device))
-                    for name, p in tqdm.tqdm(
-                        list(model.state_dict().items()), desc=model_name
-                    )
-                }
-            )
-            print(json.dumps(dict(**config, **outcome)), file=outf, flush=True)
-            wandb.summary.update(outcome)
-            wandb.finish()
-            del model
+    def run_weight_stats(self, out: Path) -> None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            raise ValueError(f"Output log {out} already exists - please delete first")
+        with out.open("w") as outf:
+            for i, model_name in enumerate(self.models):
+                print(f"-- model {i+1}/{len(self.models)}", file=sys.stderr)
+                model = transformers.AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=torch.bfloat16
+                )
+                config = self.__dict__.copy()
+                config["test"] = "weight_stats"
+                del config["models"]
+                config["model"] = model_name
+                config["device"] = config["device"].type
+                config["code_changes"] = CODE_CHANGES
+                wandb.init(
+                    entity="graphcore",
+                    project=PROJECT,
+                    reinit=True,
+                    config=config,
+                )
+                outcome = dict(
+                    weight_stats={
+                        name: tensor_stats(p.to(self.device))
+                        for name, p in tqdm.tqdm(
+                            list(model.state_dict().items()), desc=model_name
+                        )
+                    }
+                )
+                print(json.dumps(dict(**config, **outcome)), file=outf, flush=True)
+                wandb.summary.update(outcome)
+                wandb.finish()
+                del model

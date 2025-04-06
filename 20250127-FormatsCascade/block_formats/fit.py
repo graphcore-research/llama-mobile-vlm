@@ -24,6 +24,18 @@ class Scaled:
     compressor: Q.Compressor | None
     args: dict[str, Any] = dataclasses.field(default_factory=lambda: {})
 
+    _type: str = "fit_scaled"
+
+    def __str__(self) -> str:
+        block = ",".join("*" if g is None else str(g) for g in self.block_shape)
+        compress = f"+Z{self.compressor}" if self.compressor else ""
+        args = (
+            "(" + ",".join(f"{k}={v}" for k, v in self.args.items()) + ")"
+            if self.args
+            else ""
+        )
+        return f"{self.element_bits}b-{self.element_family}{args}{compress}{{{block}:{self.scale_format}:{self.scaling}}}"
+
     def fit(self, tensor: Tensor) -> Q.TensorFormat:
         return _scaled_quantiser(
             tensor,

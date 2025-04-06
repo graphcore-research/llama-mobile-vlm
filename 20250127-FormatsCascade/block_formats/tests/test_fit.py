@@ -29,10 +29,10 @@ def test_scaled_quantiser() -> None:
         for block_size, scaling in [(None, "rms"), (16, "rms"), (32, "absmax")]:
             fmt = F.Scaled(
                 4,
-                element_family,
+                element_family,  # type:ignore[arg-type]
                 Q.BFLOAT16,
                 (block_size,),
-                scaling,
+                scaling,  # type:ignore[arg-type]
                 compressor=None,
             ).fit(x)
             expected_b = 4 + 16 / (block_size or x.nelement())

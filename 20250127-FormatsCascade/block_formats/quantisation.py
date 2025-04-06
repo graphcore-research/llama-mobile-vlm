@@ -22,7 +22,7 @@ from typing import (
 import scipy.stats
 import torch
 import tqdm
-from torch import Tensor, nn
+from torch import Tensor
 
 Shape = Tuple[int, ...]
 

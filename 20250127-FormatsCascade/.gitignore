@@ -3,5 +3,6 @@ Dev.ipynb
 .vscode
 
 /archive/out
+/out/dev.jsonl
 /overleaf
 /wandb

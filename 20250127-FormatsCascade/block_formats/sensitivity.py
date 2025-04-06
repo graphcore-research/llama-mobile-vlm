@@ -12,10 +12,10 @@ class _LinearWithGradSq(torch.autograd.Function):
         return input @ weight.T
 
     @staticmethod
-    def backward(
+    def backward(  # type:ignore[override]
         ctx: torch.autograd.function.FunctionCtx, grad_output: Tensor
     ) -> tuple[Optional[Tensor], Tensor]:
-        input, weight = ctx.saved_tensors
+        input, weight = ctx.saved_tensors  # type:ignore[attr-defined]
         grad_output_flat = grad_output.flatten(end_dim=-2).float()
         input_flat = input.flatten(end_dim=-2).float()
         grad_sq_weight = grad_output_flat.T.square() @ input_flat.square()
@@ -28,7 +28,9 @@ class _LinearWithGradSq(torch.autograd.Function):
         output: Tensor,
     ) -> None:
         input, weight = inputs
-        ctx.save_for_backward(input, weight if input.requires_grad else None)
+        ctx.save_for_backward(
+            input, weight if input.requires_grad else None  # type:ignore[arg-type]
+        )
 
 
 class LinearGradSqWrapper(nn.Module):
