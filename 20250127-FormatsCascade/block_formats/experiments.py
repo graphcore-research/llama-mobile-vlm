@@ -69,12 +69,13 @@ class Dataset:
         kl_topk: int,
         sequence_limit: int | None = None,
         seed: int = 120081,
+        split: str = "test",
     ) -> "Dataset":
         """Load and tokenize the dataset, then use the model to provide reference logits."""
 
         dataset_name = ("Salesforce/wikitext", "wikitext-2-raw-v1")
         (device,) = set(p.device for p in model.parameters())
-        data = datasets.load_dataset(*dataset_name, split="test")["text"]
+        data = datasets.load_dataset(*dataset_name, split=split)["text"]
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model.config._name_or_path
         )
@@ -131,7 +132,7 @@ class Dataset:
                 topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
 
         return cls(
-            name=":".join(dataset_name),
+            name=":".join(dataset_name + (split,)),
             tokens=tokens,
             masks=masks,
             bos_token_id=tokenizer.bos_token_id,
