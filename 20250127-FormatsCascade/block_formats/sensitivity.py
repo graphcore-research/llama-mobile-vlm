@@ -38,7 +38,7 @@ class LinearGradSqWrapper(nn.Module):
 
     def __init__(self, wrapped: nn.Linear):
         super().__init__()
-        assert not wrapped.bias
+        assert wrapped.bias is None
         assert not isinstance(wrapped, type(self))
         self.wrapped = wrapped
 
@@ -46,7 +46,7 @@ class LinearGradSqWrapper(nn.Module):
         return _LinearWithGradSq.apply(input, self.wrapped.weight)
 
     @classmethod
-    def wrap(cls, model: nn.Module):
+    def wrap(cls, model: nn.Module) -> None:
         for m in model.modules():
             if not isinstance(m, cls):
                 for name, child in m.named_children():
@@ -54,7 +54,7 @@ class LinearGradSqWrapper(nn.Module):
                         setattr(m, name, cls(child))
 
     @classmethod
-    def unwrap(cls, model: nn.Module):
+    def unwrap(cls, model: nn.Module) -> None:
         for m in model.modules():
             for name, child in m.named_children():
                 if isinstance(child, cls):
