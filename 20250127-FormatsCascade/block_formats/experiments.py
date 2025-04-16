@@ -8,9 +8,10 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import datasets
+import safetensors.torch
 import torch
 import tqdm
 import transformers
@@ -18,8 +19,9 @@ from torch import Tensor, nn, tensor
 
 import wandb
 
-from . import quantisation as Q
 from . import fit as F
+from . import quantisation as Q
+from . import sensitivity as S
 
 PROJECT = "block-number-formats"
 CODE_CHANGES = ("lut-bucketize", "rename-to-block", "sequence-losses")
@@ -61,26 +63,32 @@ class Dataset:
         return self.topk_indices.shape[-1]
 
     @classmethod
-    def load_wikitext2(
+    def load_wikitext(
         cls,
         model: transformers.PreTrainedModel,
         sequence_length: int,
         batch_size: int,
         kl_topk: int,
         sequence_limit: int | None = None,
+        line_limit: int | None = None,
         seed: int = 120081,
         split: str = "test",
+        progress: bool = False,
     ) -> "Dataset":
         """Load and tokenize the dataset, then use the model to provide reference logits."""
 
-        dataset_name = ("Salesforce/wikitext", "wikitext-2-raw-v1")
+        dataset_name = ("Salesforce/wikitext", "wikitext-103-raw-v1")
         (device,) = set(p.device for p in model.parameters())
         data = datasets.load_dataset(*dataset_name, split=split)["text"]
+        if line_limit:
+            data = data[:line_limit]
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model.config._name_or_path
         )
         flat_tokens = [
-            t for d in data for t in tokenizer(d, add_special_tokens=False).input_ids
+            t
+            for d in tqdm.tqdm(data, desc="tokenising", disable=not progress)
+            for t in tokenizer(d, add_special_tokens=False).input_ids
         ]
 
         # Trim any final incomplete sequence and create sequences
@@ -122,14 +130,17 @@ class Dataset:
             device=device,
             dtype=torch.float32,
         )
-        with torch.no_grad():
-            for tokens_, topk_indices_, topk_logp_ in zip(
-                tokens, topk_indices, topk_logp
-            ):
-                logp_ = model(
-                    nn.functional.pad(tokens_, (1, 0), value=tokenizer.bos_token_id)
-                ).logits.log_softmax(-1)
-                topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
+        if kl_topk:
+            with torch.no_grad():
+                for tokens_, topk_indices_, topk_logp_ in zip(
+                    tqdm.tqdm(tokens, desc="reference topk", disable=not progress),
+                    topk_indices,
+                    topk_logp,
+                ):
+                    logp_ = model(
+                        nn.functional.pad(tokens_, (1, 0), value=tokenizer.bos_token_id)
+                    ).logits.log_softmax(-1)
+                    topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
 
         return cls(
             name=":".join(dataset_name + (split,)),
@@ -308,7 +319,7 @@ class TokenPredictionSweep:
                     model_name, device=self.device, dtype=torch.bfloat16
                 )
                 n_params = sum(p.nelement() for p in model.model.parameters())
-                data = Dataset.load_wikitext2(
+                data = Dataset.load_wikitext(
                     model.model,
                     sequence_length=self.sequence_length,
                     batch_size=self.batch_size,
@@ -495,7 +506,7 @@ class WeightStatsSweep:
         )
     )
 
-    def run_weight_stats(self, out: Path) -> None:
+    def run(self, out: Path) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists():
             raise ValueError(f"Output log {out} already exists - please delete first")
@@ -529,3 +540,82 @@ class WeightStatsSweep:
                 wandb.summary.update(outcome)
                 wandb.finish()
                 del model
+
+
+# empirical_fisher
+
+
+def empirical_diag_fisher(
+    data: Dataset,
+    model: nn.Module,
+    loss: str = "cross_entropy",
+    progress: bool = False,
+) -> dict[str, Tensor]:
+    """Compute the diagonal of the empirical Fisher information for Linear/Embedding weight parameters."""
+
+    param_to_name = {}  # Handle parameter sharing
+    for name, p in model.named_parameters():
+        p.requires_grad_(False)  # Save memory by skipping parameter gradients
+        param_to_name[p] = name
+    S.wrap(model)
+    try:
+        for index in tqdm.tqdm(
+            list(range(data.n_batch)), desc="fisher", disable=not progress
+        ):
+            losses = data.batch_losses(model, index)
+            # Compute as a sum - scaling by sequence_length to cancel the mean-over-sequence
+            losses[loss].backward(torch.full_like(losses[loss], data.sequence_length))
+        results = {}
+        for module in model.modules():
+            if isinstance(module, S.Wrapper):
+                name = param_to_name[module.wrapped.weight]
+                # Convert to a mean over batch and sequence
+                grad_weight_sq = module.grad_weight_sq / (
+                    data.masks.sum() * data.sequence_length
+                )
+                if name in results:
+                    results[name] += grad_weight_sq
+                else:
+                    results[name] = grad_weight_sq
+        return results
+    finally:
+        S.unwrap(model)
+
+
+@dataclass
+class EmpiricalFisherSweep:
+    sequence_length: int = 4096
+    sequence_limit: int | None = 1024
+    line_limit: int | None = int(1e5)
+    batch_size: int = 1
+    models: list[str] = dataclasses.field(default_factory=lambda: TEST_MODELS.copy())
+    device: torch.device = dataclasses.field(
+        default_factory=lambda: torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+    )
+
+    def run(self, out: Path) -> None:
+        out.mkdir(parents=True, exist_ok=True)
+        for model_name in self.models:
+            print(model_name, file=sys.stderr)
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=torch.bfloat16, device_map=self.device
+            )
+            data = Dataset.load_wikitext(
+                model,
+                sequence_length=self.sequence_length,
+                sequence_limit=self.sequence_limit,
+                line_limit=self.line_limit,
+                batch_size=self.batch_size,
+                kl_topk=0,
+                split="train",
+                progress=True,
+            )
+            sensitivity = empirical_diag_fisher(
+                data, model, loss="cross_entropy", progress=True
+            )
+            safetensors.torch.save_file(
+                sensitivity, out / f"{model_name.replace('/', '--')}.safetensors"
+            )
+            del model
