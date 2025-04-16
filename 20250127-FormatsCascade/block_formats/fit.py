@@ -36,9 +36,10 @@ class Scaled:
         )
         return f"{self.element_bits}b-{self.element_family}{args}{compress}{{{block}:{self.scale_format}:{self.scaling}}}"
 
-    def fit(self, tensor: Tensor) -> Q.TensorFormat:
+    def fit(self, tensor: Tensor, weight: Tensor | None = None) -> Q.TensorFormat:
         return _scaled_quantiser(
             tensor,
+            weight=weight,
             element_bits=self.element_bits,
             element_family=self.element_family,
             scale_format=self.scale_format,
@@ -50,13 +51,16 @@ class Scaled:
 
 
 def _fit_scale(
-    tensor: Tensor, format: Q.TensorFormat, bounds: tuple[float, float]
+    tensor: Tensor,
+    format: Q.TensorFormat,
+    weight: Tensor | None,
+    bounds: tuple[float, float],
 ) -> Q.ScaledFormat:
     """Wrap `format` in a `ScaledFormat` that is tuned to optimise RMSE."""
 
     fmt = lambda log_s: Q.ScaledFormat(format, 2**log_s)
     opt = scipy.optimize.minimize_scalar(
-        lambda log_s: Q.qrmse_norm(fmt(log_s), tensor).item(),
+        lambda log_s: Q.qrmse_norm(fmt(log_s), tensor, weight=weight).item(),
         bounds=(log2(bounds[0]), log2(bounds[1])),
         options=dict(xatol=0.1),
     )
@@ -65,6 +69,7 @@ def _fit_scale(
 
 def _scaled_quantiser(
     tensor: Tensor,
+    weight: Tensor | None,
     element_bits: float,
     element_family: Literal["int", "fp", "normal", "laplace", "t", "lloyd_max"],
     scale_format: Q.TensorFormat,
@@ -123,7 +128,7 @@ def _scaled_quantiser(
         args = args.copy()
         args.setdefault("init", "kmeans++" if scaling == "rms" else "uniform_minmax")
         args.setdefault("threshold", 1e-4)
-        element_format = Q.lut_lloyd_max(tensor, element_bits, **args)
+        element_format = Q.lut_lloyd_max(tensor, element_bits, weight=weight, **args)
     else:
         if scaling == "rms":
             base_scale = (
@@ -132,7 +137,7 @@ def _scaled_quantiser(
                 else 1.0
             )
             fit_scale = lambda fmt: _fit_scale(
-                tensor, fmt, (base_scale / 16, base_scale * 16)
+                tensor, fmt, weight, (base_scale / 16, base_scale * 16)
             )
         else:
             fit_scale = lambda fmt: fmt
@@ -151,13 +156,15 @@ def _scaled_quantiser(
                 fit_scale(Q.FPFormat(e, element_bits - e - 1, "nearest"))
                 for e in range(2, element_bits)
             ]
-            element_format = min(fmts, key=lambda fmt: Q.qrmse_norm(fmt, tensor).item())
+            element_format = min(
+                fmts, key=lambda fmt: Q.qrmse_norm(fmt, tensor, weight=weight).item()
+            )
 
         elif element_family == "t":
             # 1D search over df
             fmt = lambda log2df: fit_scale(Q.crd_t(element_bits, 2**log2df, **args))
             opt = scipy.optimize.minimize_scalar(
-                lambda log2df: Q.qrmse_norm(fmt(log2df), tensor).item(),
+                lambda log2df: Q.qrmse_norm(fmt(log2df), tensor, weight=weight).item(),
                 bounds=(log2(3), log2(100)),
                 options=dict(xatol=0.1),
             )

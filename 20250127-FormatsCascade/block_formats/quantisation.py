@@ -36,16 +36,23 @@ def shuffle(t: Tensor) -> Tensor:
     return y.view(t.shape)
 
 
-def rmse_norm(x: Tensor, qx: Tensor) -> Tensor:
+def rmse_norm(x: Tensor, qx: Tensor, weight: Tensor | None = None) -> Tensor:
     """RMS error of quantisation, normalised by original tensor RMS."""
     x = x.float()
-    qx = qx.float()
-    return ((qx - x).pow(2).sum() / x.pow(2).sum()).sqrt()
+    d2 = qx.to(torch.float32, copy=True).sub_(x).square_()
+    x2 = x.square()
+    if weight is not None:
+        weight = weight.to(torch.float32, copy=True).square_()
+        d2.mul_(weight)
+        x2.mul_(weight)
+    return (d2.sum() / x2.sum()).sqrt()
 
 
-def qrmse_norm(fmt: "TensorFormat", tensor: Tensor) -> Tensor:
+def qrmse_norm(
+    fmt: "TensorFormat", tensor: Tensor, weight: Tensor | None = None
+) -> Tensor:
     """RMS error of quantisation, normalised by original tensor RMS."""
-    return rmse_norm(tensor, fmt.quantise(tensor))
+    return rmse_norm(tensor, fmt.quantise(tensor), weight=weight)
 
 
 def snr(x: Tensor, qx: Tensor) -> Tensor:
@@ -391,7 +398,9 @@ LloydMaxInit: TypeAlias = Union[
 ]
 
 
-def _lloyd_max_init(init: LloydMaxInit, tensor: Tensor, codepoints: int) -> Tensor:
+def _lloyd_max_init(
+    init: LloydMaxInit, tensor: Tensor, weight: Tensor | None, codepoints: int
+) -> Tensor:
     if isinstance(init, Tensor):
         assert init.shape == (codepoints,)
         return init.to(tensor.dtype, copy=True)
@@ -421,8 +430,11 @@ def _lloyd_max_init(init: LloydMaxInit, tensor: Tensor, codepoints: int) -> Tens
             midpoints[: i + 1] = midpoints[: i + 1].sort().values
             closest = torch.bucketize(s, (midpoints[:i] + midpoints[1 : i + 1]) / 2)
             p = (s - midpoints[closest]) ** 2
+            if weight is not None:
+                p *= weight[: len(s)].pow(2)
         return midpoints
     if init == "cuberoot":
+        # Note: doesn't respect `weight`
         s = tensor[: int(2**20)].sort().values
         delta = (s[1:] - s[:-1]) ** (2 / 3)
         # delta += delta.mean()
@@ -440,6 +452,7 @@ def lut_lloyd_max(
     bits: float,
     threshold: float,
     *,
+    weight: Tensor | None = None,
     init: LloydMaxInit = "kmeans++",
     incremental: bool = True,
     max_samples: int | None = None,
@@ -450,10 +463,18 @@ def lut_lloyd_max(
 
     threshold -- when the ratio of changed cluster assignments <= threshold, stop
 
+    weight -- if provided, a positive tensor the same shape as `tensor`, to use as an
+              importance weight for each sample
+
     incremental -- start with a subset of the data and scale up
     """
+
     # Preparation: shuffle, truncate, cast, get init
-    tensor = shuffle(tensor.flatten())
+    idx = torch.randperm(tensor.nelement(), device=tensor.device, dtype=torch.int32)
+    tensor = tensor.flatten()[idx]
+    if weight is not None:
+        weight = weight.flatten()[idx]
+
     if max_samples is not None:
         tensor = tensor[:max_samples]
     if dtype is None:
@@ -461,7 +482,10 @@ def lut_lloyd_max(
         # mantissa length, so default to float64
         dtype = torch.float32 if tensor.nelement() <= 2**26 else torch.float64
     tensor = tensor.to(dtype)
-    midpoints = _lloyd_max_init(init, tensor, int(round(2**bits)))
+    midpoints = _lloyd_max_init(init, tensor, weight, int(round(2**bits)))
+    if weight is not None:
+        weight = weight.to(dtype)
+        sum_weight = torch.empty_like(midpoints)
 
     # K-means iteration
     idx = torch.empty(tensor.shape, device=tensor.device, dtype=torch.int64)
@@ -472,7 +496,21 @@ def lut_lloyd_max(
         last_idx[:n] = idx[:n]
         boundaries = (midpoints[1:] + midpoints[:-1]) / 2
         torch.bucketize(tensor[:n], boundaries, out=idx[:n])
-        midpoints.scatter_reduce_(0, idx[:n], tensor[:n], "mean", include_self=False)
+
+        if weight is None:
+            midpoints.scatter_reduce_(
+                0, idx[:n], tensor[:n], "mean", include_self=False
+            )
+        else:
+            # Weighted mean for each midpoint
+            midpoints.scatter_reduce_(
+                0, idx[:n], tensor[:n] * weight[:n], "sum", include_self=False
+            )
+            sum_weight.zero_().scatter_reduce_(
+                0, idx[:n], weight[:n], "sum", include_self=False
+            )
+            midpoints.div_(sum_weight.clamp_min_(torch.finfo(dtype).smallest_normal))
+
         midpoints = torch.cummax(midpoints, 0).values
         idx_change = (last_idx[:n] != idx[:n]).float().mean().item()
         tqdm_.set_postfix_str(f"{idx_change:.1e}")
