@@ -1,0 +1,116 @@
+# Copyright (c) 2025 Graphcore Ltd. All rights reserved.
+
+import dataclasses
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+import safetensors.torch
+import torch
+import tqdm
+import transformers
+from torch import Tensor, nn
+
+from .. import sensitivity as S
+from . import core, token_prediction
+
+
+def diag_fisher(
+    data: token_prediction.Dataset,
+    model: nn.Module,
+    mode: Literal["empirical", "single_sample"],
+    progress: bool = False,
+) -> dict[str, Tensor]:
+    """Compute the diagonal of the Fisher information for Linear/Embedding weight parameters."""
+
+    param_to_name = {}  # Handle parameter sharing
+    for name, p in model.named_parameters():
+        p.requires_grad_(False)  # Save memory by skipping parameter gradients
+        param_to_name[p] = name
+    S.wrap(model)
+    try:
+        for index in tqdm.tqdm(
+            list(range(data.n_batch)), desc="fisher", disable=not progress
+        ):
+            tokens = data.tokens[index]
+            logits = model(
+                nn.functional.pad(tokens, (1, 0), value=data.bos_token_id)
+            ).logits[:, :-1]
+            if mode == "empirical":
+                targets = tokens
+            elif mode == "single_sample":
+                targets = logits.add(
+                    torch.rand_like(logits).log_().neg_().log_().neg_()
+                ).argmax(-1)
+            nn.functional.cross_entropy(
+                logits.flatten(end_dim=-2), targets.flatten(), reduction="none"
+            ).view(targets.shape).backward(
+                data.masks[index]
+                .to(logits.dtype)
+                .unsqueeze(1)
+                .broadcast_to(targets.shape)
+            )
+        results = {}
+        for module in model.modules():
+            if isinstance(module, S.Wrapper):
+                name = param_to_name[module.wrapped.weight]
+                # Convert to a mean over batch and sequence
+                grad_weight_sq = module.grad_weight_sq.sum() / (
+                    data.masks.sum().cpu() * data.sequence_length
+                )
+                if name in results:
+                    results[name] += grad_weight_sq
+                else:
+                    results[name] = grad_weight_sq
+        return results
+    finally:
+        S.unwrap(model)
+
+
+@dataclass
+class Sweep:
+    experiment: str
+    mode: Literal["single_sample", "empirical"] = "single_sample"
+    sequence_length: int = 4096
+    sequence_limit: int | None = 1024
+    line_limit: int | None = int(1e5)
+    batch_size: int = 1
+    model: list[str] = core.FIELD_MODELS
+    device: torch.device = core.FIELD_DEVICE
+    type: str = "fisher"
+
+    def run(self, out: Path) -> None:
+        for config in core.iter_dict_product(
+            dataclasses.asdict(self), "model", progress=True
+        ):
+            with core.Experiment(config) as experiment:
+                model = transformers.AutoModelForCausalLM.from_pretrained(
+                    config["model"], torch_dtype=torch.bfloat16, device_map=self.device
+                )
+                data = token_prediction.Dataset.load_wikitext(
+                    model,
+                    sequence_length=self.sequence_length,
+                    sequence_limit=self.sequence_limit,
+                    line_limit=self.line_limit,
+                    batch_size=self.batch_size,
+                    kl_topk=0,
+                    split="train",
+                    progress=True,
+                )
+                sensitivity = diag_fisher(data, model, mode=self.mode, progress=True)
+
+                out.mkdir(parents=True, exist_ok=True)
+                out_file = out / f"{config['model'].replace('/', '--')}.safetensors"
+                safetensors.torch.save_file(
+                    {k: v.bfloat16() for k, v in sensitivity.items()}, out_file
+                )
+                experiment.summary(
+                    fisher={k: v.sum() for k, v in sensitivity.items()},
+                    file_sha=(
+                        subprocess.check_output(["sha256sum", str(out_file)])
+                        .decode()
+                        .split(" ")[0]
+                    ),
+                )
+                del model

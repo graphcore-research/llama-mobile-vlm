@@ -1003,7 +1003,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
         counts = (
             lut.to_idx(data.flatten())
             .bincount(minlength=len(lut.values))
-            .to(data.dtype)
+            .to(torch.float32)
             .add_(smoothing)
         )
         return cls(

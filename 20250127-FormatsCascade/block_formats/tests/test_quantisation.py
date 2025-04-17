@@ -1,3 +1,5 @@
+# Copyright (c) 2025 Graphcore Ltd. All rights reserved.
+
 import dataclasses
 import json
 
