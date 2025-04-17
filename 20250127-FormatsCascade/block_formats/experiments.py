@@ -8,7 +8,7 @@ import sys
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import datasets
 import safetensors.torch
@@ -115,7 +115,7 @@ class Dataset:
             tokens, (0, 0, 0, -n_sequence % batch_size), value=tokenizer.eos_token_id
         ).view(-1, batch_size, sequence_length - 1)
         n_batch = tokens.shape[0]
-        masks = (torch.arange(n_batch * batch_size) < n_sequence).view(
+        masks = (torch.arange(n_batch * batch_size, device=device) < n_sequence).view(
             n_batch, batch_size
         )
 
@@ -542,16 +542,16 @@ class WeightStatsSweep:
                 del model
 
 
-# empirical_fisher
+# fisher
 
 
-def empirical_diag_fisher(
+def diag_fisher(
     data: Dataset,
     model: nn.Module,
-    loss: str = "cross_entropy",
+    mode: Literal["empirical", "single_sample"],
     progress: bool = False,
 ) -> dict[str, Tensor]:
-    """Compute the diagonal of the empirical Fisher information for Linear/Embedding weight parameters."""
+    """Compute the diagonal of the Fisher information for Linear/Embedding weight parameters."""
 
     param_to_name = {}  # Handle parameter sharing
     for name, p in model.named_parameters():
@@ -562,16 +562,31 @@ def empirical_diag_fisher(
         for index in tqdm.tqdm(
             list(range(data.n_batch)), desc="fisher", disable=not progress
         ):
-            losses = data.batch_losses(model, index)
-            # Compute as a sum - scaling by sequence_length to cancel the mean-over-sequence
-            losses[loss].backward(torch.full_like(losses[loss], data.sequence_length))
+            tokens = data.tokens[index]
+            logits = model(
+                nn.functional.pad(tokens, (1, 0), value=data.bos_token_id)
+            ).logits[:, :-1]
+            if mode == "empirical":
+                targets = tokens
+            elif mode == "single_sample":
+                targets = logits.add(
+                    torch.rand_like(logits).log_().neg_().log_().neg_()
+                ).argmax(-1)
+            nn.functional.cross_entropy(
+                logits.flatten(end_dim=-2), targets.flatten(), reduction="none"
+            ).view(targets.shape).backward(
+                data.masks[index]
+                .to(logits.dtype)
+                .unsqueeze(1)
+                .broadcast_to(targets.shape)
+            )
         results = {}
         for module in model.modules():
             if isinstance(module, S.Wrapper):
                 name = param_to_name[module.wrapped.weight]
                 # Convert to a mean over batch and sequence
-                grad_weight_sq = module.grad_weight_sq / (
-                    data.masks.sum() * data.sequence_length
+                grad_weight_sq = module.grad_weight_sq.sum() / (
+                    data.masks.sum().cpu() * data.sequence_length
                 )
                 if name in results:
                     results[name] += grad_weight_sq
@@ -583,7 +598,8 @@ def empirical_diag_fisher(
 
 
 @dataclass
-class EmpiricalFisherSweep:
+class FisherSweep:
+    mode: Literal["single_sample", "empirical"] = "single_sample"
     sequence_length: int = 4096
     sequence_limit: int | None = 1024
     line_limit: int | None = int(1e5)
@@ -612,9 +628,7 @@ class EmpiricalFisherSweep:
                 split="train",
                 progress=True,
             )
-            sensitivity = empirical_diag_fisher(
-                data, model, loss="cross_entropy", progress=True
-            )
+            sensitivity = diag_fisher(data, model, mode=self.mode, progress=True)
             safetensors.torch.save_file(
                 sensitivity, out / f"{model_name.replace('/', '--')}.safetensors"
             )

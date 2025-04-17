@@ -4,23 +4,55 @@ import torch
 from torch import Tensor, nn
 
 
-class Wrapper(nn.Module):
-    def _accumulate(self, name: str, value: Tensor) -> None:
-        if (v := getattr(self, name)) is not None:
-            v += value
+class TwoStageAccumulator:
+    """An on-device low-precision accumulator and on-CPU float32 accumulator."""
+
+    def __init__(self, headroom_bits: float = 2):
+        self.headroom_bits = headroom_bits
+        self.reset()
+
+    def reset(self) -> None:
+        self.sum0, self.count0 = None, 0
+        self.sum1, self.count1 = None, 0
+
+    def accumulate(self, value: Tensor) -> None:
+        if self.sum0 is None:
+            self.sum0 = value
         else:
-            setattr(self, name, value.to(self.dtype))
+            self.sum0 += value
+        self.count0 += 1
+
+        if self.count0 >= 2 / torch.finfo(torch.bfloat16).eps / 2**self.headroom_bits:
+            self.count1 += self.count0
+            self.count0 = 0
+            if self.sum1 is None:
+                self.sum1 = self.sum0.to(torch.device("cpu"), torch.float32)
+            else:
+                self.sum1 += self.sum0.to(self.sum1)
+            self.sum0 = None
+
+    def sum(self) -> Tensor:
+        if self.sum1 is not None:
+            if self.sum0 is not None:
+                return self.sum1 + self.sum0.to(self.sum1)
+            return self.sum1
+        return self.sum0.to(torch.device("cpu"), torch.float32)
+
+
+class Wrapper(nn.Module):
+    pass
 
 
 class LinearWrapper(Wrapper):
     """Wraps a linear layer with no bias, to calculate sum(grad_weight**2), sum(input**2), sum(grad_output**2)."""
 
-    def __init__(self, wrapped: nn.Linear, dtype: torch.dtype | None):
+    def __init__(self, wrapped: nn.Linear):
         super().__init__()
         assert wrapped.bias is None
         self.wrapped = wrapped
-        self.dtype = dtype
-        self.input_sq = self.grad_output_sq = self.grad_weight_sq = None
+        self.input_sq = TwoStageAccumulator()
+        self.grad_output_sq = TwoStageAccumulator()
+        self.grad_weight_sq = TwoStageAccumulator()
 
     def forward(self, input: Tensor) -> Tensor:
         y = nn.functional.linear(input, self.wrapped.weight, self.wrapped.bias)
@@ -33,20 +65,20 @@ class LinearWrapper(Wrapper):
         input_sq = input.flatten(end_dim=-2).float().square()
         grad_output_sq = grad_output.flatten(end_dim=-2).float().square()
         grad_weight_sq = grad_output_sq.T @ input_sq
-        dtype = self.dtype or input.dtype
 
-        self._accumulate("input_sq", input_sq.sum(0).to(dtype))
-        self._accumulate("grad_output_sq", grad_output_sq.sum(0).to(dtype))
-        self._accumulate("grad_weight_sq", grad_weight_sq.to(dtype))
+        self.input_sq.accumulate(input_sq.sum(0).to(input.dtype))
+        self.grad_output_sq.accumulate(grad_output_sq.sum(0).to(input.dtype))
+        self.grad_weight_sq.accumulate(grad_weight_sq.to(input.dtype))
 
 
 class EmbeddingWrapper(Wrapper):
-    def __init__(self, wrapped: nn.Embedding, dtype: torch.dtype | None):
+    def __init__(self, wrapped: nn.Embedding):
         super().__init__()
         assert wrapped.padding_idx is None
         self.wrapped = wrapped
-        self.dtype = dtype
-        self.input_sq = self.grad_output_sq = self.grad_weight_sq = None
+        self.input_sq = TwoStageAccumulator()
+        self.grad_output_sq = TwoStageAccumulator()
+        self.grad_weight_sq = TwoStageAccumulator()
 
     def forward(self, input: Tensor) -> Tensor:
         y = nn.functional.embedding(
@@ -66,33 +98,31 @@ class EmbeddingWrapper(Wrapper):
         input_sq = torch.bincount(
             input.flatten(), minlength=self.wrapped.num_embeddings
         )
-        grad_output_sq = grad_output.flatten(end_dim=-2).float().square()
-        dtype = self.dtype or grad_output.dtype
+        grad_output_sq = grad_output.flatten(end_dim=-2).square()
 
-        self._accumulate("input_sq", input_sq.to(dtype))
-        self._accumulate("grad_output_sq", grad_output_sq.sum(0).to(dtype))
-        # Accumulate manually, to avoid a memory spike
-        if self.grad_weight_sq is None:
-            self.grad_weight_sq = torch.zeros(
-                self.wrapped.weight.shape, device=input.device, dtype=dtype
+        self.input_sq.accumulate(input_sq.to(grad_output.dtype))
+        self.grad_output_sq.accumulate(
+            grad_output_sq.float().sum(0).to(grad_output.dtype)
+        )
+        self.grad_weight_sq.accumulate(
+            torch.zeros_like(self.wrapped.weight).scatter_add_(
+                0,
+                input.flatten()[:, None].expand(
+                    (input.nelement(), self.wrapped.embedding_dim)
+                ),
+                grad_output_sq,
             )
-        self.grad_weight_sq.scatter_add_(
-            0,
-            input.flatten()[:, None].expand(
-                (input.nelement(), self.wrapped.embedding_dim)
-            ),
-            grad_output_sq.to(self.grad_weight_sq),
         )
 
 
-def wrap(model: nn.Module, dtype: torch.dtype | None = None) -> None:
+def wrap(model: nn.Module) -> None:
     for m in model.modules():
         if not isinstance(m, Wrapper):
             for name, child in m.named_children():
                 if isinstance(child, nn.Linear):
-                    setattr(m, name, LinearWrapper(child, dtype=dtype))
+                    setattr(m, name, LinearWrapper(child))
                 if isinstance(child, nn.Embedding):
-                    setattr(m, name, EmbeddingWrapper(child, dtype=dtype))
+                    setattr(m, name, EmbeddingWrapper(child))
 
 
 def unwrap(model: nn.Module) -> None:
