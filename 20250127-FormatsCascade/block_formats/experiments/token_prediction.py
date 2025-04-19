@@ -2,7 +2,6 @@
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any
 
 import datasets
 import torch
@@ -10,8 +9,6 @@ import tqdm
 import transformers
 from torch import Tensor, nn
 
-from .. import fit as F
-from .. import quantisation as Q
 from . import core
 
 
@@ -187,92 +184,10 @@ class Dataset:
             return {k: torch.concat([x[k] for x in losses]) for k in losses[0]}
 
 
-# Maps parameter name (or a default "*") to quantisation format or fit spec
-ModelFormats = dict[str, Q.TensorFormat | F.Scaled]
-
-
-@dataclass
-class RequantisableModel:
-    """Wraps transformers.PreTrainedModel, storing original parameters on CPU,
-    so that they can be restored when needed.
-    """
-
-    model: transformers.PreTrainedModel
-    original_params: dict[str, nn.Parameter]
-
-    @classmethod
-    def load(
-        cls, name: str, device: torch.device, dtype: torch.dtype
-    ) -> "RequantisableModel":
-        model = transformers.AutoModelForCausalLM.from_pretrained(
-            name, device_map=device, torch_dtype=dtype
-        )
-        original_params = {
-            k: v.to("cpu", copy=True) for k, v in model.state_dict().items()
-        }
-        return cls(model=model, original_params=original_params)
-
-    @property
-    def device(self) -> torch.device:
-        (device,) = set(p.device for p in self.model.parameters())
-        return device
-
-    def reset(self) -> None:
-        for name, p in self.model.state_dict().items():
-            p[...] = self.original_params[name].to(p.device)
-
-    def quantise(self, formats: ModelFormats) -> list[dict[str, Any]]:
-        """Quantise parameters of the model, returning a log of the outcomes.
-
-        formats -- dict[ParamName, Quantiser]
-
-            Tries `formats[param_name] or formats["*"]`, if neither is found, the parameter
-            is unquantised.
-
-            Quantiser can be a Q.TensorFormat, which is used directly or an F.Scaled which
-            is first fitted to each tensor being quantised
-
-        returns -- list[ParamRecord] -- records bits, quantisation error etc.
-        """
-        log = []
-        for name, p in self.model.state_dict().items():
-            if p.ndim == 2:
-                p0 = self.original_params[name].to(p.device)
-                fmt_or_fit = formats.get(name, formats.get("*"))
-                if fmt_or_fit:
-                    if isinstance(fmt_or_fit, Q.TensorFormat):
-                        fmt = fmt_or_fit
-                    elif isinstance(fmt_or_fit, F.Scaled):
-                        fmt = fmt_or_fit.fit(p0)
-                    p[...] = fmt.quantise(p0)
-                    log.append(
-                        dict(
-                            name=name,
-                            quantised=True,
-                            nelement=p.nelement(),
-                            bits=fmt.count_bits_tensor(p),
-                            rmse=(p - p0).float().pow(2).mean().sqrt().item(),
-                            norm=p0.float().pow(2).mean().sqrt().item(),
-                            fmt=dataclasses.asdict(fmt),
-                            fmt_str=str(fmt),
-                        )
-                    )
-                    continue
-            log.append(
-                dict(
-                    name=name,
-                    quantised=False,
-                    nelement=p.nelement(),
-                    bits=Q.TorchFormat(p.dtype).count_bits(p.shape),
-                )
-            )
-        return log
-
-
 @dataclass
 class Sweep:
     experiment: str
-    format: list[ModelFormats]
+    format: list[core.ModelFormats]
     sequence_length: int = 4096
     kl_topk: int = 128
     batch_size: int = 1
@@ -283,7 +198,7 @@ class Sweep:
 
     def run(self) -> None:
         for mconfig in core.iter_dict_product(self.__dict__, "model", progress=True):
-            model = RequantisableModel.load(
+            model = core.RequantisableModel.load(
                 mconfig["model"], device=self.device, dtype=torch.bfloat16
             )
             n_params = sum(p.nelement() for p in model.model.parameters())

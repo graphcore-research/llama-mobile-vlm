@@ -74,7 +74,8 @@ class LinearWrapper(Wrapper):
 class EmbeddingWrapper(Wrapper):
     def __init__(self, wrapped: nn.Embedding):
         super().__init__()
-        assert wrapped.padding_idx is None
+        # We can ignore `padding_idx`, as it has the same behaviour as any other index
+        # in the forward pass, so we can calculate sensitivity in the same way
         self.wrapped = wrapped
         self.input_sq = TwoStageAccumulator()
         self.grad_output_sq = TwoStageAccumulator()
