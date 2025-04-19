@@ -302,7 +302,7 @@ def run(run_id: str) -> dict[str, Any]:
     response = _db().get_item(Key=dict(experiment=run_id.split("/")[0], run_id=run_id))
     if "Item" not in response:
         raise KeyError(f"Run {run_id} not found")
-    return response["Item"]
+    return _from_db(response["Item"])
 
 
 def runs(experiment: str) -> list[dict[str, Any]]:
