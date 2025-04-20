@@ -61,9 +61,6 @@ def iter_dict_product(
 
 # RequantisableModel
 
-# Maps parameter name (or a default "*") to quantisation format or fit spec
-ModelFormats = dict[str, Q.TensorFormat | F.Scaled]
-
 
 @dataclass
 class RequantisableModel:
@@ -82,7 +79,7 @@ class RequantisableModel:
             name, device_map=device, torch_dtype=dtype
         )
         original_params = {
-            k: v.to("cpu", copy=True) for k, v in model.state_dict().items()
+            k: v.detach().to("cpu", copy=True) for k, v in model.named_parameters()
         }
         return cls(model=model, original_params=original_params)
 
@@ -92,55 +89,16 @@ class RequantisableModel:
         return device
 
     def reset(self) -> None:
-        for name, p in self.model.state_dict().items():
-            p[...] = self.original_params[name].to(p.device)
+        for name, p in self.model.named_parameters():
+            p.data[...] = self.original_params[name].to(p.device)
+            if hasattr(p, "_quantised"):
+                del p._quantised
 
-    def quantise(self, formats: ModelFormats) -> list[dict[str, Any]]:
-        """Quantise parameters of the model, returning a log of the outcomes.
-
-        formats -- dict[ParamName, Quantiser]
-
-            Tries `formats[param_name] or formats["*"]`, if neither is found, the parameter
-            is unquantised.
-
-            Quantiser can be a Q.TensorFormat, which is used directly or an F.Scaled which
-            is first fitted to each tensor being quantised
-
-        returns -- list[ParamRecord] -- records bits, quantisation error etc.
-        """
-        log = []
-        for name, p in self.model.state_dict().items():
-            if p.ndim == 2:
-                p0 = self.original_params[name].to(p.device)
-                fmt_or_fit = formats.get(name, formats.get("*"))
-                if fmt_or_fit:
-                    if isinstance(fmt_or_fit, Q.TensorFormat):
-                        fmt = fmt_or_fit
-                    elif isinstance(fmt_or_fit, F.Scaled):
-                        fmt = fmt_or_fit.fit(p0)
-                    p[...] = fmt.quantise(p0)
-                    log.append(
-                        dict(
-                            name=name,
-                            quantised=True,
-                            nelement=p.nelement(),
-                            bits=fmt.count_bits_tensor(p),
-                            rmse=(p - p0).float().pow(2).mean().sqrt().item(),
-                            norm=p0.float().pow(2).mean().sqrt().item(),
-                            fmt=dataclasses.asdict(fmt),
-                            fmt_str=str(fmt),
-                        )
-                    )
-                    continue
-            log.append(
-                dict(
-                    name=name,
-                    quantised=False,
-                    nelement=p.nelement(),
-                    bits=Q.TorchFormat(p.dtype).count_bits(p.shape),
-                )
-            )
-        return log
+    def reset_parameter(self, name: str) -> None:
+        p = dict(self.model.named_parameters())[name]
+        p.data[...] = self.original_params[name].to(p.device)
+        if hasattr(p, "_quantised"):
+            del p._quantised
 
 
 # Database
@@ -154,12 +112,8 @@ class AttrDict(dict):
         self.__dict__ = self
 
 
-def _generate_id(experiment: str) -> str:
-    return (
-        experiment
-        + "/"
-        + "".join(random.choices(string.ascii_letters + string.digits, k=10))
-    )
+def _generate_id() -> str:
+    return "".join(random.choices(string.ascii_letters + string.digits, k=10))
 
 
 def _get_username() -> str | None:
@@ -236,7 +190,7 @@ class Experiment:
         self._db = _db()
         config = config.copy()
         experiment = config.pop("experiment")
-        self.run_id = _generate_id(experiment)
+        self.run_id = _generate_id()
         self._record = dict(
             experiment=experiment,
             run_id=self.run_id,
@@ -297,12 +251,19 @@ def _call_paginated(
         start = dict(ExclusiveStartKey=response["LastEvaluatedKey"])
 
 
-def run(run_id: str) -> dict[str, Any]:
+def _run_from_db(run: dict[str, Any]) -> dict[str, Any]:
+    run = _from_db(run)
+    run["id"] = f"{run.experiment}/{run.run_id}"
+    return run
+
+
+def run(id: str) -> dict[str, Any]:
     """Fetch a specific run by ID."""
-    response = _db().get_item(Key=dict(experiment=run_id.split("/")[0], run_id=run_id))
+    experiment, run_id = id.split("/")
+    response = _db().get_item(Key=dict(experiment=experiment, run_id=run_id))
     if "Item" not in response:
-        raise KeyError(f"Run {run_id} not found")
-    return _from_db(response["Item"])
+        raise KeyError(f"Run {id} not found")
+    return _run_from_db(response["Item"])
 
 
 def runs(experiment: str) -> list[dict[str, Any]]:
@@ -310,7 +271,13 @@ def runs(experiment: str) -> list[dict[str, Any]]:
     items = _call_paginated(
         _db(), "query", KeyConditionExpression=dbc.Key("experiment").eq(experiment)
     )
-    return sorted((_from_db(x) for x in items), key=lambda x: x["meta"]["time"])
+    return sorted((_run_from_db(x) for x in items), key=lambda x: x["meta"]["time"])
+
+
+def delete_run(id: str) -> None:
+    """Remove the given run."""
+    experiment, run_id = id.split("/")
+    _db().delete_item(Key=dict(experiment=experiment, run_id=run_id))
 
 
 def experiments() -> list[str]:
@@ -320,9 +287,3 @@ def experiments() -> list[str]:
         for x in _call_paginated(_db(), "scan", ProjectionExpression="experiment")
     )
     return [dict(experiment=k, runs=counts[k]) for k in sorted(counts)]
-
-
-def delete_run(run_id: str) -> None:
-    """Remove the given run."""
-    experiment = run_id.split("/")[0]
-    _db().delete_item(Key=dict(experiment=experiment, run_id=run_id))

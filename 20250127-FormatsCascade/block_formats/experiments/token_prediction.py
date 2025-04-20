@@ -2,6 +2,7 @@
 
 import dataclasses
 from dataclasses import dataclass
+from typing import Any
 
 import datasets
 import torch
@@ -9,6 +10,7 @@ import tqdm
 import transformers
 from torch import Tensor, nn
 
+from .. import model_quantisation as M
 from . import core
 
 
@@ -184,24 +186,106 @@ class Dataset:
             return {k: torch.concat([x[k] for x in losses]) for k in losses[0]}
 
 
+# Tests
+
+
+@dataclass
+class Baseline:
+    type: str = "baseline"
+
+    def to_config(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    def run(
+        self, model: core.RequantisableModel, data: Dataset, progress: bool
+    ) -> dict[str, Any]:
+        return data.evaluate(model.model)
+
+
+@dataclass
+class QuantiseFixed:
+    fmt: M.FmtSpec
+    type: str = "quantise_fixed"
+
+    def to_config(self) -> dict[str, Any]:
+        d = dataclasses.asdict(self)
+        d["fmt_str"] = str(self.fmt)
+        return d
+
+    def run(
+        self, model: core.RequantisableModel, data: Dataset, progress: bool
+    ) -> dict[str, Any]:
+        log = M.quantise_2d_fixed_(model.model, self.fmt)
+        return dict(**log, **data.evaluate(model.model))
+
+
+@dataclass
+class QuantiseEachParam:
+    fmt: M.FmtSpec
+    type: str = "quantise_each_param"
+
+    def to_config(self) -> dict[str, Any]:
+        d = dataclasses.asdict(self)
+        d["fmt_str"] = str(self.fmt)
+        return d
+
+    def run(
+        self, model: core.RequantisableModel, data: Dataset, progress: bool
+    ) -> dict[str, Any]:
+        results = {}
+        for name, param in tqdm.tqdm(
+            list(model.model.named_parameters()), disable=not progress
+        ):
+            if param.ndim == 2:
+                M.quantise_parameter_(param, self.fmt)
+                results[name] = dict(**param._quantised, **data.evaluate(model.model))
+                model.reset_parameter(name)
+        return results
+
+
+@dataclass
+class PerturbEachParam:
+    scale: float
+    distribution: str = "normal"
+    type: str = "perturb_each_param"
+
+    def to_config(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    def run(
+        self, model: core.RequantisableModel, data: Dataset, progress: bool
+    ) -> dict[str, Any]:
+        results = {}
+        for name, param in tqdm.tqdm(
+            list(model.model.named_parameters()), disable=not progress
+        ):
+            if param.ndim == 2:
+                norm = param.float().square().mean().sqrt()
+                param.data[...] += torch.randn_like(param).mul_(norm * self.scale)
+                results[name] = dict(**data.evaluate(model.model), norm=norm.item())
+                model.reset_parameter(name)
+        return results
+
+
 @dataclass
 class Sweep:
     experiment: str
-    format: list[core.ModelFormats]
+    test: list[QuantiseFixed | QuantiseEachParam | PerturbEachParam]  # sweep
+    model: list[str] = core.FIELD_MODELS  # sweep
     sequence_length: int = 4096
     kl_topk: int = 128
     batch_size: int = 1
     sequence_limit: int | None = None
-    model: list[str] = core.FIELD_MODELS
     device: torch.device = core.FIELD_DEVICE
     type: str = "token_prediction"
 
-    def run(self) -> None:
-        for mconfig in core.iter_dict_product(self.__dict__, "model", progress=True):
+    def run(self, progress: bool = True) -> None:
+        for mconfig in core.iter_dict_product(
+            self.__dict__, "model", progress=progress
+        ):
             model = core.RequantisableModel.load(
                 mconfig["model"], device=self.device, dtype=torch.bfloat16
             )
-            n_params = sum(p.nelement() for p in model.model.parameters())
             data = Dataset.load_wikitext(
                 model.model,
                 sequence_length=self.sequence_length,
@@ -210,22 +294,11 @@ class Sweep:
                 sequence_limit=self.sequence_limit,
             )
             mconfig["dataset"] = data.name
-            for fconfig in core.iter_dict_product(mconfig, "format", progress=True):
-                format_ = fconfig.pop("format")
-                fconfig["format_str"] = {k: str(v) for k, v in format_.items()}
-                fconfig["format"] = {
-                    k: dataclasses.asdict(v) for k, v in format_.items()
-                }
-                with core.Experiment(fconfig) as experiment:
-                    log = model.quantise(format_)
-                    metrics = data.evaluate(model.model)
-                    metrics.update({f"{k}_mean": v.mean() for k, v in metrics.items()})
-                    experiment.summary(
-                        n_sequences=data.masks.sum().item(),
-                        n_params=n_params,
-                        params={d.pop("name"): d for d in log},
-                        bits_per_param=sum(d["bits"] for d in log) / n_params,
-                        **{k: v.tolist() for k, v in metrics.items()},
-                    )
+            for tconfig in core.iter_dict_product(mconfig, "test", progress=progress):
+                test = tconfig.pop("test")
+                tconfig["test"] = test.to_config()
+                with core.Experiment(tconfig) as experiment:
+                    model.reset()
+                    experiment.summary(**test.run(model, data, progress=progress))
             del model
             del data
