@@ -30,9 +30,7 @@ def quantise_parameter_(param: nn.Parameter, fmt_spec: FmtSpec) -> None:
         param._quantised = dict(
             bits=fmt.count_bits_tensor(param),
             rmse=(new_value - param).float().pow(2).mean().sqrt().item(),
-            norm=param.float().pow(2).mean().sqrt().item(),
-            fmt=dataclasses.asdict(fmt),
-            fmt_str=str(fmt),
+            rms=param.float().pow(2).mean().sqrt().item(),
         )
         param[...] = new_value
 

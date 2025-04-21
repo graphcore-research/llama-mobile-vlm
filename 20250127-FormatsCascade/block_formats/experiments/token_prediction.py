@@ -1,5 +1,6 @@
 # Copyright (c) 2025 Graphcore Ltd. All rights reserved.
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 from typing import Any
@@ -196,9 +197,12 @@ class Baseline:
     def to_config(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
-    def run(
-        self, model: core.RequantisableModel, data: Dataset, progress: bool
-    ) -> dict[str, Any]:
+    def args(
+        self, model: core.RequantisableModel, data: Dataset
+    ) -> list[dict[str, Any]]:
+        return [{}]
+
+    def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
         return data.evaluate(model.model)
 
 
@@ -212,9 +216,12 @@ class QuantiseFixed:
         d["fmt_str"] = str(self.fmt)
         return d
 
-    def run(
-        self, model: core.RequantisableModel, data: Dataset, progress: bool
-    ) -> dict[str, Any]:
+    def args(
+        self, model: core.RequantisableModel, data: Dataset
+    ) -> list[dict[str, Any]]:
+        return [{}]
+
+    def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
         log = M.quantise_2d_fixed_(model.model, self.fmt)
         return dict(**log, **data.evaluate(model.model))
 
@@ -229,18 +236,24 @@ class QuantiseEachParam:
         d["fmt_str"] = str(self.fmt)
         return d
 
+    def args(
+        self, model: core.RequantisableModel, data: Dataset
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(parameter=name)
+            for name, p in model.model.named_parameters()
+            if p.ndim == 2
+        ]
+
     def run(
-        self, model: core.RequantisableModel, data: Dataset, progress: bool
+        self, model: core.RequantisableModel, data: Dataset, parameter: str
     ) -> dict[str, Any]:
-        results = {}
-        for name, param in tqdm.tqdm(
-            list(model.model.named_parameters()), disable=not progress
-        ):
-            if param.ndim == 2:
-                M.quantise_parameter_(param, self.fmt)
-                results[name] = dict(**param._quantised, **data.evaluate(model.model))
-                model.reset_parameter(name)
-        return results
+        p = dict(model.model.named_parameters())[parameter]
+        try:
+            M.quantise_parameter_(p, self.fmt)
+            return dict(**p._quantised, **data.evaluate(model.model))
+        finally:
+            model.reset_parameter(parameter)
 
 
 @dataclass
@@ -252,19 +265,25 @@ class PerturbEachParam:
     def to_config(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
+    def args(
+        self, model: core.RequantisableModel, data: Dataset
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(parameter=name)
+            for name, p in model.model.named_parameters()
+            if p.ndim == 2
+        ]
+
     def run(
-        self, model: core.RequantisableModel, data: Dataset, progress: bool
+        self, model: core.RequantisableModel, data: Dataset, parameter: str
     ) -> dict[str, Any]:
-        results = {}
-        for name, param in tqdm.tqdm(
-            list(model.model.named_parameters()), disable=not progress
-        ):
-            if param.ndim == 2:
-                norm = param.float().square().mean().sqrt()
-                param.data[...] += torch.randn_like(param).mul_(norm * self.scale)
-                results[name] = dict(**data.evaluate(model.model), norm=norm.item())
-                model.reset_parameter(name)
-        return results
+        p = dict(model.model.named_parameters())[parameter]
+        try:
+            rms = p.float().square().mean().sqrt()
+            p.data[...] += torch.randn_like(p).mul_(rms * self.scale)
+            return dict(rms=rms.item(), **data.evaluate(model.model))
+        finally:
+            model.reset_parameter(parameter)
 
 
 @dataclass
@@ -297,8 +316,11 @@ class Sweep:
             for tconfig in core.iter_dict_product(mconfig, "test", progress=progress):
                 test = tconfig.pop("test")
                 tconfig["test"] = test.to_config()
-                with core.Experiment(tconfig) as experiment:
-                    model.reset()
-                    experiment.summary(**test.run(model, data, progress=progress))
+                model.reset()
+                for run_args in tqdm.tqdm(test.args(model, data), disable=not progress):
+                    rconfig = copy.deepcopy(tconfig)
+                    rconfig["test"].update(run_args)
+                    with core.Experiment(rconfig) as experiment:
+                        experiment.summary(**test.run(model, data, **run_args))
             del model
             del data
