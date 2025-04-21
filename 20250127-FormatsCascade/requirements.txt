@@ -102,9 +102,9 @@ stack-data==0.6.3
 sympy==1.13.1
 tensor-tracker @ git+https://github.com/graphcore-research/pytorch-tensor-tracker@223f99605041034dc99a43a5b186886c217ad762
 tokenizers==0.20.3
-torch==2.5.0
+torch==2.5.1
 torchao==0.7.0
-torchaudio==2.5.0
+torchaudio==2.5.1
 torchvision==0.20.1
 tornado==6.4.2
 tqdm==4.67.1
