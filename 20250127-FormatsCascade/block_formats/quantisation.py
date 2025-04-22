@@ -764,12 +764,14 @@ def block_normalise(
     def _get_scale(block_tensor: Tensor) -> Tensor:
         """Reduce over odd dimensions (1, 3, ...) to get the scale."""
         block_dims = tuple(range(1, block_tensor.ndim, 2))
+        eps = torch.finfo(block_tensor.dtype).smallest_normal
         if scaling == "absmax":
             element_absmax = min(-element_range[0], element_range[1])
             return (
                 block_tensor.abs()
                 .amax(dim=block_dims, keepdim=True)
                 .div(element_absmax)
+                .clamp_min_(eps)
             )
         if scaling == "signmax":
             element_signmax = (
@@ -777,8 +779,8 @@ def block_normalise(
                 if -element_range[0] > element_range[1]
                 else element_range[1]
             )
-            bmin = block_tensor.amin(dim=block_dims, keepdim=True)
-            bmax = block_tensor.amax(dim=block_dims, keepdim=True)
+            bmin = block_tensor.amin(dim=block_dims, keepdim=True).clamp_max_(-eps)
+            bmax = block_tensor.amax(dim=block_dims, keepdim=True).clamp_min_(eps)
             return torch.where(-bmin > bmax, bmin, bmax).div(element_signmax)
         if scaling == "rms":
             # Care is required here when everything in a block is small but non-zero,
@@ -800,7 +802,6 @@ def block_normalise(
     )
     scale = scale_format.quantise(
         _get_scale(tensor.reshape(blocked_shape))
-        .clamp_min_(torch.finfo(tensor.dtype).smallest_normal)
         .broadcast_to(blocked_shape)
         .reshape(tensor.shape)
     )
