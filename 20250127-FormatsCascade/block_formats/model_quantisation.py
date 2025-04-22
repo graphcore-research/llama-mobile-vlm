@@ -35,15 +35,22 @@ def quantise_parameter_(param: nn.Parameter, fmt_spec: FmtSpec) -> None:
         param[...] = new_value
 
 
-def quantise_2d_fixed_(model: nn.Module, fmt_spec: FmtSpec) -> dict[str, Any]:
+def quantise_2d_fixed_(
+    model: nn.Module, fmt_spec: FmtSpec, ignore: tuple[str] = ("vision_model",)
+) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
+
+    Only quantise 2D parameters and ignore anything under "vision_model" (default).
 
     Returns a dictionary describing the quantisation result.
     """
     param_log = {}
     for name, param in model.named_parameters():
-        if param.ndim == 2:
-            quantise_parameter_(param, fmt_spec)
+        if param.ndim == 2 and not any(p in ignore for p in name.split(".")):
+            try:
+                quantise_parameter_(param, fmt_spec)
+            except Exception as e:
+                raise ValueError(f"Failed to quantise {name!r}") from e
             param_log[name] = dict(
                 nelement=param.nelement(),
                 **param._quantised,
