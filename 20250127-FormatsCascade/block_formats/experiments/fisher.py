@@ -26,14 +26,21 @@ def activation_checkpointing_enabled(
     Warning - care might be necessary, in case the .training flag on `LlamaModel` etc
     is used to enable dropout.
     """
-    assert not model.is_gradient_checkpointing and not model.model.training
+    assert not model.is_gradient_checkpointing
     try:
+        # Don't use .train(), as we don't want to enable dropout.
+        # Just hope none of the PreTrainedModel classes don't set dropout themselves.
+        for m in model.modules():
+            if isinstance(m, transformers.modeling_utils.PreTrainedModel):
+                assert not m.training
+                m.training = True
         model.gradient_checkpointing_enable()
-        model.model.training = True
-        yield
+        yield model
     finally:
-        model.model.training = False
         model.gradient_checkpointing_disable()
+        for m in model.modules():
+            if isinstance(m, transformers.modeling_utils.PreTrainedModel):
+                m.training = False
 
 
 def diag_fisher(
@@ -41,6 +48,7 @@ def diag_fisher(
     model: nn.Module,
     mode: Literal["empirical", "single_sample"],
     progress: bool = False,
+    ignore: tuple[str] = ("vision_model",),
 ) -> dict[str, Tensor]:
     """Compute the diagonal of the Fisher information for Linear/Embedding weight parameters."""
 
@@ -76,14 +84,15 @@ def diag_fisher(
         for module in model.modules():
             if isinstance(module, S.Wrapper):
                 name = param_to_name[module.wrapped.weight]
-                # Convert to a mean over batch and sequence
-                grad_weight_sq = module.grad_weight_sq.sum() / (
-                    data.masks.sum().cpu() * data.sequence_length
-                )
-                if name in results:
-                    results[name] += grad_weight_sq
-                else:
-                    results[name] = grad_weight_sq
+                if not any(p in ignore for p in name.split(".")):
+                    # Convert to a mean over batch and sequence
+                    grad_weight_sq = module.grad_weight_sq.sum() / (
+                        data.masks.sum().cpu() * data.sequence_length
+                    )
+                    if name in results:
+                        results[name] += grad_weight_sq
+                    else:
+                        results[name] = grad_weight_sq
         return results
     finally:
         S.unwrap(model)
@@ -120,7 +129,9 @@ class Sweep:
                     progress=True,
                 )
                 with activation_checkpointing_enabled(model):
-                    sensitivity = diag_fisher(data, model, mode=self.mode, progress=True)
+                    sensitivity = diag_fisher(
+                        data, model, mode=self.mode, progress=True
+                    )
 
                 out.mkdir(parents=True, exist_ok=True)
                 out_file = out / f"{config['model'].replace('/', '--')}.safetensors"

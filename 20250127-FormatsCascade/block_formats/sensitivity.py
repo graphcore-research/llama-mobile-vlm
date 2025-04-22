@@ -44,11 +44,10 @@ class Wrapper(nn.Module):
 
 
 class LinearWrapper(Wrapper):
-    """Wraps a linear layer with no bias, to calculate sum(grad_weight**2), sum(input**2), sum(grad_output**2)."""
+    """Wraps a linear layer, to calculate sum(grad_weight**2), sum(input**2), sum(grad_output**2)."""
 
     def __init__(self, wrapped: nn.Linear):
         super().__init__()
-        assert wrapped.bias is None
         self.wrapped = wrapped
         self.input_sq = TwoStageAccumulator()
         self.grad_output_sq = TwoStageAccumulator()
