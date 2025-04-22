@@ -12,9 +12,10 @@ if __name__ == "__main__":
             torch.bfloat16,
         )
         data = E.token_prediction.Dataset.load_wikitext(model.model, 4096, 1, 0, 4)
-        result = E.fisher.diag_fisher(
-            data, model.model, mode="single_sample", progress=True
-        )
+        with E.fisher.activation_checkpointing_enabled(model.model):
+            result = E.fisher.diag_fisher(
+                data, model.model, mode="single_sample", progress=True
+            )
     finally:
         out = Path("out/memory")
         out.mkdir(parents=True, exist_ok=True)

@@ -1,10 +1,11 @@
 # Copyright (c) 2025 Graphcore Ltd. All rights reserved.
 
+import contextlib
 import dataclasses
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Iterable, Literal
 
 import safetensors.torch
 import torch
@@ -14,6 +15,25 @@ from torch import Tensor, nn
 
 from .. import sensitivity as S
 from . import core, token_prediction
+
+
+@contextlib.contextmanager
+def activation_checkpointing_enabled(
+    model: transformers.PreTrainedModel,
+) -> Iterable[transformers.PreTrainedModel]:
+    """A context manager to enable activation checkpointing, without enabling dropout.
+
+    Warning - care might be necessary, in case the .training flag on `LlamaModel` etc
+    is used to enable dropout.
+    """
+    assert not model.is_gradient_checkpointing and not model.model.training
+    try:
+        model.gradient_checkpointing_enable()
+        model.model.training = True
+        yield
+    finally:
+        model.model.training = False
+        model.gradient_checkpointing_disable()
 
 
 def diag_fisher(
@@ -35,7 +55,8 @@ def diag_fisher(
         ):
             tokens = data.tokens[index]
             logits = model(
-                nn.functional.pad(tokens, (1, 0), value=data.bos_token_id)
+                nn.functional.pad(tokens, (1, 0), value=data.bos_token_id),
+                use_cache=False,
             ).logits[:, :-1]
             if mode == "empirical":
                 targets = tokens
@@ -98,7 +119,8 @@ class Sweep:
                     split="train",
                     progress=True,
                 )
-                sensitivity = diag_fisher(data, model, mode=self.mode, progress=True)
+                with activation_checkpointing_enabled(model):
+                    sensitivity = diag_fisher(data, model, mode=self.mode, progress=True)
 
                 out.mkdir(parents=True, exist_ok=True)
                 out_file = out / f"{config['model'].replace('/', '--')}.safetensors"
