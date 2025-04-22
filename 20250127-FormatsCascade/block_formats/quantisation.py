@@ -781,9 +781,13 @@ def block_normalise(
             bmax = block_tensor.amax(dim=block_dims, keepdim=True)
             return torch.where(-bmin > bmax, bmin, bmax).div(element_signmax)
         if scaling == "rms":
+            # Care is required here when everything in a block is small but non-zero,
+            # so that the RMS underflows. We need to clamp_min_ before sqrt() to avoid
+            # NaN or exploding values.
             return (
                 block_tensor.pow(2)
                 .mean(dim=block_dims, keepdim=True, dtype=torch.float32)
+                .clamp_min_(torch.finfo(torch.float32).smallest_normal)
                 .sqrt()
                 .to(block_tensor.dtype)
             )
@@ -796,6 +800,7 @@ def block_normalise(
     )
     scale = scale_format.quantise(
         _get_scale(tensor.reshape(blocked_shape))
+        .clamp_min_(torch.finfo(tensor.dtype).smallest_normal)
         .broadcast_to(blocked_shape)
         .reshape(tensor.shape)
     )

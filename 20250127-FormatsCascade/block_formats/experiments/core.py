@@ -139,12 +139,14 @@ def _device_info() -> dict[str, Any]:
         return {}
 
 
-def _to_db(value: Any) -> Any:
+def _to_db(value: Any, prefix: tuple[Any] = ()) -> Any:
     if isinstance(
         value, (str, int, decimal.Decimal, bool, type(None), bytes, bytearray)
     ):
         return value
     if isinstance(value, float):
+        if np.isnan(value) or np.isinf(value):
+            raise TypeError(f"Bad value {'.'.join(map(str, prefix))}={value}")
         # Approximately match float32 precision
         return decimal.Decimal.from_float(value).normalize(decimal.Context(prec=8))
     if isinstance(value, torch.dtype):
@@ -152,19 +154,22 @@ def _to_db(value: Any) -> Any:
     if isinstance(value, torch.device):
         return value.type
     if isinstance(value, (list, tuple)):
-        return [_to_db(v) for v in value]
+        return [_to_db(v, prefix + (i,)) for i, v in enumerate(value)]
     if isinstance(value, (np.ndarray, Tensor)):
-        return _to_db(value.tolist())
+        return _to_db(value.tolist(), prefix)
     if isinstance(value, set):
-        return {_to_db(v) for v in value}
+        return {_to_db(v, prefix + ("#",)) for v in value}
     if isinstance(value, dict):
         non_string_keys = [k for k in value if not isinstance(k, str)]
         if non_string_keys:
             raise TypeError(
-                f"Cannot convert non-string keys for the database: {set(type(k) for k in non_string_keys)}"
+                f"Cannot convert non-string keys for the database, "
+                f"{'.'.join(map(str, prefix))}:{set(type(k) for k in non_string_keys)}"
             )
-        return {k: _to_db(v) for k, v in value.items()}
-    raise TypeError(f"Unexpected type for database: {type(value)}")
+        return {k: _to_db(v, prefix + (k,)) for k, v in value.items()}
+    raise TypeError(
+        f"Unexpected type for database, {'.'.join(map(str, prefix))}:{type(value)}"
+    )
 
 
 def _from_db(value: Any) -> Any:
@@ -189,12 +194,12 @@ class Experiment:
     def __init__(self, config: dict[str, Any]):
         self._db = _db()
         config = config.copy()
-        experiment = config.pop("experiment")
+        self.experiment = config.pop("experiment")
         self.run_id = _generate_id()
         self._record = dict(
-            experiment=experiment,
+            experiment=self.experiment,
             run_id=self.run_id,
-            config=_to_db(config),
+            config=config,
             meta=dict(
                 status="running",
                 time=datetime.datetime.now().isoformat(),
@@ -206,14 +211,30 @@ class Experiment:
             error=None,
         )
         self._t0 = time.time()
-        self.sync()
+        self.sync(unrecoverable=True)
 
-    def sync(self) -> None:
-        self._db.put_item(Item=_to_db(self._record))
+    def sync(self, unrecoverable: bool = False) -> None:
+        try:
+            self._db.put_item(Item=_to_db(self._record))
+        except Exception as error:
+            if unrecoverable:
+                print(
+                    f'ERROR: Failed to sync experiment "{self.experiment}/{self.run_id}"'
+                    f" with {error!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            raise
 
     def summary(self, **args: Any) -> None:
-        self._record["summary"].update(args)
-        self.sync()
+        old_summary = self._record["summary"]
+        self._record["summary"] = {**self._record["summary"], **args}
+        try:
+            self.sync()
+        except Exception:
+            # Restore the original summary so that sync isn't broken, and we can still log the error
+            self._record["summary"] = old_summary
+            raise
 
     def __enter__(self) -> "Experiment":
         return self
@@ -236,7 +257,7 @@ class Experiment:
         else:
             self._record["meta"].update(status="finished")
         self._record["meta"].update(duration=time.time() - self._t0)
-        self.sync()
+        self.sync(unrecoverable=True)
 
 
 def _call_paginated(

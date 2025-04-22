@@ -9,6 +9,17 @@ from torch import tensor
 from .. import quantisation as Q
 
 
+def test_block_normalise() -> None:
+    # Check the case where the normalisation axis is all-zero
+    xs = torch.arange(3, dtype=torch.float32)[:, None].broadcast_to((3, 4))
+    for scaling in ["absmax", "rms"]:
+        torch.testing.assert_close(
+            Q.block_normalise(xs, (1, None), scaling, (-1, 1), Q.FP32)[0],
+            torch.tensor([0.0, 1.0, 1.0])[:, None].broadcast_to((3, 4)),
+            msg=f"scaling={scaling}",
+        )
+
+
 def test_linear_scaling_format() -> None:
     fmt = Q.LinearScalingFormat(Q.IntFormat(2), Q.FP32, (3,), "absmax")
     assert "absmax" in str(fmt)
