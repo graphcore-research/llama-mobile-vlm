@@ -10,6 +10,7 @@ aws configure
 
 mkdir ~/block-formats || true
 python3 -m venv ~/block-formats/venv
+# python3 -m venv --system-site-packages ~/block-formats/venv  # GH200
 ln -s ~/block-formats/venv .venv || true
 source .venv/bin/activate
 pip install -r requirements.txt
