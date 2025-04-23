@@ -351,6 +351,9 @@ class RandomRotationFormat(TensorFormat):
     seed: int
     _type: str = "random_rotation"
 
+    def __str__(self) -> str:
+        return f"{self.format}{{rot{list(self.dims)}}}"
+
     def rotate(self, tensor: Tensor) -> tuple[Tensor, list[Tensor]]:
         """Returns (rotated, [rotations, ...])."""
         generator = torch.Generator(tensor.device).manual_seed(self.seed)
