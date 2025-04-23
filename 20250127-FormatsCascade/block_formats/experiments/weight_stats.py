@@ -10,6 +10,7 @@ import transformers
 from torch import Tensor, tensor
 
 from .. import quantisation as Q
+from .. import model_quantisation as M
 from . import core
 
 
@@ -111,9 +112,6 @@ def tensor_stats(w: Tensor) -> dict[str, Any]:
             # Maxima
             max=w.abs().amax().item(),
             block_max=[mean_block_amax(w, b).item() for b in block_sizes],
-            block_max_shuffled=[
-                mean_block_amax(Q.shuffle(w), b).item() for b in block_sizes
-            ],
             # Histograms
             hist=scaled_hist(w, hist_bins, dim=None).tolist(),
             channel_hist=[
@@ -142,12 +140,16 @@ class Sweep:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
                     config["model"], torch_dtype=torch.bfloat16
                 )
+                params = [
+                    (name, param)
+                    for name, param in model.named_parameters()
+                    if param.ndim == 2
+                    and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
+                ]
                 experiment.summary(
                     weight_stats={
                         name: tensor_stats(p.to(self.device))
-                        for name, p in tqdm.tqdm(
-                            list(model.state_dict().items()), desc=config["model"]
-                        )
+                        for name, p in tqdm.tqdm(params, desc=config["model"])
                     }
                 )
                 del model

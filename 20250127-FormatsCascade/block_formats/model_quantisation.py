@@ -35,8 +35,11 @@ def quantise_parameter_(param: nn.Parameter, fmt_spec: FmtSpec) -> None:
         param[...] = new_value
 
 
+DEFAULT_IGNORE = ("vision_model",)
+
+
 def quantise_2d_fixed_(
-    model: nn.Module, fmt_spec: FmtSpec, ignore: tuple[str] = ("vision_model",)
+    model: nn.Module, fmt_spec: FmtSpec, ignore: tuple[str] = DEFAULT_IGNORE
 ) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
 

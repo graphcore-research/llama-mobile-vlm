@@ -14,6 +14,7 @@ import transformers
 from torch import Tensor, nn
 
 from .. import sensitivity as S
+from .. import model_quantisation as M
 from . import core, token_prediction
 
 
@@ -48,7 +49,7 @@ def diag_fisher(
     model: nn.Module,
     mode: Literal["empirical", "single_sample"],
     progress: bool = False,
-    ignore: tuple[str] = ("vision_model",),
+    ignore: tuple[str] = M.DEFAULT_IGNORE,
 ) -> dict[str, Tensor]:
     """Compute the diagonal of the Fisher information for Linear/Embedding weight parameters."""
 
