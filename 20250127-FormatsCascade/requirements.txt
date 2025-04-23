@@ -1,5 +1,7 @@
 accelerate==1.6.0
+arithmetic_compressor==0.2
 boto3==1.37.35
+dahuffman==0.4.2
 datasets==3.5.0
 ipykernel==6.29.5
 matplotlib==3.10.1
