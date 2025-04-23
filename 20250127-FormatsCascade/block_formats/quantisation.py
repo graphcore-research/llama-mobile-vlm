@@ -344,6 +344,43 @@ class ScaledFormat(ScalarFormat):
         return self.format.quantise(tensor / self.scale) * self.scale
 
 
+@dataclass
+class RandomRotationFormat(TensorFormat):
+    format: TensorFormat
+    dims: tuple[int]
+    seed: int
+    _type: str = "random_rotation"
+
+    def rotate(self, tensor: Tensor) -> tuple[Tensor, list[Tensor]]:
+        """Returns (rotated, [rotations, ...])."""
+        generator = torch.Generator(tensor.device).manual_seed(self.seed)
+        rotations = [
+            torch.nn.init.orthogonal_(
+                torch.empty(tensor.shape[dim], tensor.shape[dim], device=tensor.device),
+                generator=generator,
+            ).to(tensor.dtype)
+            for dim in self.dims
+        ]
+        for dim, rotation in zip(self.dims, rotations):
+            tensor = (tensor.movedim(dim, -1) @ rotation).movedim(-1, dim)
+        return tensor, rotations
+
+    def unrotate(self, tensor: Tensor, rotations: list[Tensor]) -> Tensor:
+        for dim, rotation in zip(self.dims, rotations):
+            tensor = (tensor.movedim(dim, -1) @ rotation.T).movedim(-1, dim)
+        return tensor
+
+    def quantise(self, tensor: Tensor) -> Tensor:
+        tensor, rotations = self.rotate(tensor)
+        return self.unrotate(self.format.quantise(tensor), rotations)
+
+    def count_bits(self, shape: Shape) -> int:
+        return self.format.count_bits(shape)
+
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        return self.format.count_bits_tensor(tensor)
+
+
 def parse(value: str) -> ScalarFormat:
     if value == "FP32":
         return FP32
@@ -894,17 +931,20 @@ class ChannelAndSparseFormat(TensorFormat):
 
     def quantise(self, tensor: Tensor) -> Tensor:
         n_sparse = self.n_sparse(tensor.shape)
-
-        # Find outliers to represent with sparity
         reduce_dims = tuple(d for d in range(tensor.ndim) if d != self.scale_dim)
-        rms_ratio = (
-            tensor.div(tensor.pow(2).mean(dim=reduce_dims, keepdim=True).sqrt())
-            .abs_()
-            .flatten()
-        )
-        sparse_idx = torch.where(
-            rms_ratio >= rms_ratio.neg().kthvalue(n_sparse - 1).values.neg()
-        )[0][:n_sparse]
+
+        if n_sparse:
+            # Find outliers to represent with sparity
+            rms_ratio = (
+                tensor.div(tensor.pow(2).mean(dim=reduce_dims, keepdim=True).sqrt())
+                .abs_()
+                .flatten()
+            )
+            sparse_idx = torch.where(
+                rms_ratio >= rms_ratio.neg().kthvalue(n_sparse - 1).values.neg()
+            )[0][:n_sparse]
+        else:
+            sparse_idx = torch.zeros(0, dtype=torch.long)
 
         # Perform channel quantisation, except for sparse values
         qtensor = tensor.flatten().clone()
@@ -914,6 +954,7 @@ class ChannelAndSparseFormat(TensorFormat):
             .pow(2)
             .mean(dim=reduce_dims, keepdim=True)
             .sqrt()
+            .broadcast_to(tensor.shape)
         ).flatten()
         qtensor = self.element_format.quantise(qtensor / scale) * scale
         qtensor[sparse_idx] = self.sparse_format.quantise(tensor.flatten()[sparse_idx])

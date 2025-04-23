@@ -20,6 +20,16 @@ def test_block_normalise() -> None:
         )
 
 
+def test_random_rotation_format() -> None:
+    # A random rotation on the heavy-tailed laplace should reduce RMSE
+    torch.manual_seed(100)
+    x = torch.distributions.Laplace(0, 1).sample((2**10, 2**12))
+    fmt = Q.RandomRotationFormat(Q.parse("E2M1"), (0,), 100)
+    rmse_rotated = Q.qrmse_norm(fmt, x).item()
+    rmse_original = Q.qrmse_norm(fmt.format, x).item()
+    assert rmse_rotated < 0.9 * rmse_original
+
+
 def test_linear_scaling_format() -> None:
     fmt = Q.LinearScalingFormat(Q.IntFormat(2), Q.FP32, (3,), "absmax")
     assert "absmax" in str(fmt)
