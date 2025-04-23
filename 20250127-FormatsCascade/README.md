@@ -4,7 +4,7 @@ Library code [`block_formats`](block_formats) and notebooks `*.pynb` + [`archive
 
 See [`Usage.ipynb`](Usage.ipynb) to get started.
 
-Fisher sensitivity checkpoints are stored at `s3://graphcore-research/2025-04-block-formats/20250417-fisher/`
+Fisher sensitivity checkpoints are stored at `s3://graphcore-research/2025-04-block-formats/20250423-fisher`
 
 ## Development
 
