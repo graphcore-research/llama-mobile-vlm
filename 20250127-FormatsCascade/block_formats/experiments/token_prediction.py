@@ -2,8 +2,10 @@
 
 import copy
 import dataclasses
+import multiprocessing
+import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable, TypeAlias
 
 import datasets
 import torch
@@ -12,7 +14,7 @@ import transformers
 from torch import Tensor, nn
 
 from .. import model_quantisation as M
-from . import core
+from . import core, fisher
 
 
 @dataclass
@@ -227,6 +229,32 @@ class QuantiseFixed:
 
 
 @dataclass
+class QuantiseVariable:
+    fmt: M.FmtSpec
+    min_element_bits: float | None = None
+    type: str = "quantise_variable"
+
+    def to_config(self) -> dict[str, Any]:
+        d = dataclasses.asdict(self)
+        d["fmt_str"] = str(self.fmt)
+        return d
+
+    def args(
+        self, model: core.RequantisableModel, data: Dataset
+    ) -> list[dict[str, Any]]:
+        return [{}]
+
+    def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
+        log = M.quantise_2d_variable(
+            model.model,
+            self.fmt,
+            fisher.fetch_fisher_sum(model.model.config._name_or_path),
+            min_element_bits=self.min_element_bits,
+        )
+        return dict(**log, **data.evaluate(model.model))
+
+
+@dataclass
 class QuantiseEachParam:
     fmt: M.FmtSpec
     type: str = "quantise_each_param"
@@ -286,11 +314,16 @@ class PerturbEachParam:
             model.reset_parameter(parameter)
 
 
+Test: TypeAlias = (
+    QuantiseFixed | QuantiseVariable | QuantiseEachParam | PerturbEachParam
+)
+
+
 @dataclass
-class Sweep:
+class Run:
     experiment: str
-    test: list[QuantiseFixed | QuantiseEachParam | PerturbEachParam]  # sweep
-    model: list[str] = core.FIELD_MODELS  # sweep
+    test: Test
+    model: str
     sequence_length: int = 4096
     kl_topk: int = 128
     batch_size: int = 1
@@ -298,29 +331,84 @@ class Sweep:
     device: torch.device = core.FIELD_DEVICE
     type: str = "token_prediction"
 
-    def run(self, progress: bool = True) -> None:
-        for mconfig in core.iter_dict_product(
-            self.__dict__, "model", progress=progress
+
+class _Runner:
+    def __init__(self):
+        self.last_run = None
+        self.model = None
+        self.data = None
+
+    def __call__(self, run: Run, progress: bool) -> None:
+        if self.last_run is None or any(
+            getattr(run, k) != getattr(self.last_run, k)
+            for k in [
+                "model",
+                "sequence_length",
+                "kl_topk",
+                "batch_size",
+                "sequence_limit",
+                "device",
+            ]
         ):
-            model = core.RequantisableModel.load(
-                mconfig["model"], device=self.device, dtype=torch.bfloat16
+            self.model = self.data = None  # allow device memory to be freed
+            self.model = core.RequantisableModel.load(
+                run.model, device=run.device, dtype=torch.bfloat16
             )
-            data = Dataset.load_wikitext(
-                model.model,
-                sequence_length=self.sequence_length,
-                batch_size=self.batch_size,
-                kl_topk=self.kl_topk,
-                sequence_limit=self.sequence_limit,
+            self.data = Dataset.load_wikitext(
+                self.model.model,
+                sequence_length=run.sequence_length,
+                batch_size=run.batch_size,
+                kl_topk=run.kl_topk,
+                sequence_limit=run.sequence_limit,
             )
-            mconfig["dataset"] = data.name
-            for tconfig in core.iter_dict_product(mconfig, "test", progress=progress):
-                test = tconfig.pop("test")
-                tconfig["test"] = test.to_config()
-                model.reset()
-                for run_args in tqdm.tqdm(test.args(model, data), disable=not progress):
-                    rconfig = copy.deepcopy(tconfig)
-                    rconfig["test"].update(run_args)
-                    with core.Experiment(rconfig) as experiment:
-                        experiment.summary(**test.run(model, data, **run_args))
-            del model
-            del data
+        self.model.reset()
+        for run_args in tqdm.tqdm(
+            run.test.args(self.model, self.data), disable=not progress
+        ):
+            config = dataclasses.asdict(run)
+            config["test"].update(run_args)
+            with core.Experiment(config) as experiment:
+                experiment.summary(**run.test.run(self.model, self.data, **run_args))
+        self.last_run = run
+
+
+_SWEEP_RUNNER: _Runner | None = None
+
+
+def _sweep_init(queue: multiprocessing.Queue) -> None:
+    # CUDA_VISIBLE_DEVICES seems better than using torch.device at
+    # reusing the torch.compile cache between GPUs
+    device = queue.get_nowait()
+    if device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    global _SWEEP_RUNNER
+    _SWEEP_RUNNER = _Runner()
+
+
+def _sweep_run(run: Run) -> None:
+    _SWEEP_RUNNER(run, progress=False)
+
+
+def run_sweep(runs: Iterable[Run], processes: int | None = None) -> None:
+    if processes is None:
+        processes = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+    if processes == 1:
+        # Run directly in the host process (easier to debug)
+        runner = _Runner()
+        for run in runs:
+            runner(run, progress=True)
+    else:
+        # Start subprocesses that "own" device IDs then use a pool to divide work
+        queue = multiprocessing.Manager().Queue()
+        for idx in range(processes):
+            queue.put(
+                (idx % torch.cuda.device_count()) if torch.cuda.is_available() else None
+            )
+        pool = multiprocessing.get_context("spawn").Pool(
+            processes, _sweep_init, (queue,)
+        )
+        for run in runs:
+            pool.apply_async(_sweep_run, (run,))
+        pool.close()
+        pool.join()
