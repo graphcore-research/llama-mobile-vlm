@@ -79,7 +79,7 @@ def _quantise_named_parameter_(
         raise ValueError(f"Failed to quantise {name!r}") from e
 
 
-def quantise_2d_fixed_(
+def quantise_2d_fixed(
     model: nn.Module, fmt_spec: FmtSpec, ignore: tuple[str] = DEFAULT_IGNORE
 ) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
@@ -98,8 +98,20 @@ def quantise_2d_variable(
     fmt_spec: F.Scaled,
     fisher_sum: dict[str, float],
     ignore: tuple[str] = DEFAULT_IGNORE,
+    min_element_bits: float | None = None,
 ) -> dict[str, Any]:
-    """Quantise a model using a variable scheme based on Fisher sensitivity."""
+    """Quantise a model using a variable scheme based on Fisher sensitivity.
+
+    Note that `fmt_spec.element_bits` is interpreted an approximate target for the
+    model-wide average bits per parameter.
+
+    `min_element_bits` -- default depends on `fmt_spec.element_family`,
+        "fp" -- 3 bits
+        otherwise -- 2 bits
+    """
+    if min_element_bits is None:
+        min_element_bits = 3 if fmt_spec.element_family == "fp" else 2
+
     params_to_quantise = _named_parameters_to_quantise(model, ignore)
     nelement = torch.tensor([p.nelement() for _, p in params_to_quantise])
     fisher_mean = torch.tensor(
@@ -115,6 +127,7 @@ def quantise_2d_variable(
             # Perhaps consider a tighter "global" method
             # We also need a minimum bit width (e.g. 3 for FP)
             bit_width = int(round(bit_width))
+        bit_width = max(bit_width, min_element_bits)
         _quantise_named_parameter_(
             name, param, dataclasses.replace(fmt_spec, element_bits=bit_width)
         )

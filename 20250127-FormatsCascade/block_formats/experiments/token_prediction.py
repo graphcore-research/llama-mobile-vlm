@@ -222,7 +222,7 @@ class QuantiseFixed:
         return [{}]
 
     def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
-        log = M.quantise_2d_fixed_(model.model, self.fmt)
+        log = M.quantise_2d_fixed(model.model, self.fmt)
         return dict(**log, **data.evaluate(model.model))
 
 

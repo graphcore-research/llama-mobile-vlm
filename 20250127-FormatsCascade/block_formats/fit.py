@@ -16,6 +16,17 @@ from . import quantisation as Q
 
 @dataclass
 class Scaled:
+    """A scaled tensor format, with "unbound" parameters that can be fit to data.
+
+    args -- valid values depend on element_family
+        int -- see `Q.IntFormat` (none)
+        fp -- see `Q.FPFormat` (if `exponent_bits` is specified, disable as search axis)
+        normal -- see `Q.crd_normal` and `Q.crd_block_normal`
+        laplace -- see `Q.crd_laplace` and `Q.crd_block_laplace`
+        t -- see `Q.crd_t` and `Q.crd_block_t` (if `df` is specified, disable as search axis)
+        lloyd_max -- see `Q.lut_lloyd_max`, e.g. "init", "threshold"
+    """
+
     element_bits: float
     element_family: Literal["int", "fp", "normal", "laplace", "t", "lloyd_max"]
     scale_format: Q.TensorFormat
@@ -151,24 +162,38 @@ def _scaled_quantiser(
             )
 
         elif element_family == "fp":
-            # Exhaustive search over exponents
-            fmts = [
-                fit_scale(Q.FPFormat(e, element_bits - e - 1, "nearest"))
-                for e in range(2, element_bits)
-            ]
-            element_format = min(
-                fmts, key=lambda fmt: Q.qrmse_norm(fmt, tensor, weight=weight).item()
-            )
+            args = args.copy()
+            args.setdefault("rounding", "nearest")
+            if "exponent_bits" in args:
+                args.setdefault(
+                    "mantissa_bits", element_bits - args["exponent_bits"] - 1
+                )
+                element_format = fit_scale(Q.FPFormat(**args))
+            else:
+                # Exhaustive search over exponents
+                fmts = [
+                    fit_scale(Q.FPFormat(e, element_bits - e - 1, **args))
+                    for e in range(2, element_bits)
+                ]
+                element_format = min(
+                    fmts,
+                    key=lambda fmt: Q.qrmse_norm(fmt, tensor, weight=weight).item(),
+                )
 
         elif element_family == "t":
-            # 1D search over df
-            fmt = lambda log2df: fit_scale(Q.crd_t(element_bits, 2**log2df, **args))
-            opt = scipy.optimize.minimize_scalar(
-                lambda log2df: Q.qrmse_norm(fmt(log2df), tensor, weight=weight).item(),
-                bounds=(log2(3), log2(100)),
-                options=dict(xatol=0.1),
-            )
-            element_format = fmt(opt.x)
+            if "df" in args:
+                element_format = fit_scale(Q.crd_t(element_bits, **args))
+            else:
+                # 1D search over df
+                fmt = lambda log2df: fit_scale(Q.crd_t(element_bits, 2**log2df, **args))
+                opt = scipy.optimize.minimize_scalar(
+                    lambda log2df: Q.qrmse_norm(
+                        fmt(log2df), tensor, weight=weight
+                    ).item(),
+                    bounds=(log2(3), log2(100)),
+                    options=dict(xatol=0.1),
+                )
+                element_format = fmt(opt.x)
 
         else:
             assert False, f"unexpected element_family {element_family!r}"

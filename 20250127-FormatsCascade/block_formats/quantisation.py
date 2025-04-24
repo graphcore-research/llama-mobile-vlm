@@ -119,7 +119,12 @@ class FPFormat(ScalarFormat):
     _type: str = "fp"
 
     def __post_init__(self) -> None:
-        assert self.exponent_bits >= 2, "FPFormat requires at least 2 exponent bits"
+        if self.exponent_bits < 2 or self.mantissa_bits < 0:
+            raise ValueError(
+                f"FPFormat(exponent_bits={self.exponent_bits},"
+                f" mantissa_bits={self.mantissa_bits}) is invalid"
+                ", requiring exponent_bits >= 2, mantissa_bits >= 0"
+            )
 
     def __str__(self) -> str:
         return f"E{self.exponent_bits}M{self.mantissa_bits}"
