@@ -18,6 +18,18 @@ from .. import model_quantisation as M
 from . import core, token_prediction
 
 
+def fetch_fisher_sum(
+    model_name: str, experiment_name: str = "20250423-fisher"
+) -> dict[str, float]:
+    """Fetch the sum-Fisher stats from a previous experiment."""
+    for run in core.runs(experiment_name):
+        if run.config.model == model_name and "fisher" in run.summary:
+            return run.summary.fisher
+    raise KeyError(
+        f"Fisher stats for model {model_name!r} not found in experiment {experiment_name!r}"
+    )
+
+
 @contextlib.contextmanager
 def activation_checkpointing_enabled(
     model: transformers.PreTrainedModel,
