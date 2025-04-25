@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, TypeAlias
+from typing import Any, Iterable, Literal
 
 import datasets
 import torch
@@ -193,9 +193,8 @@ class Dataset:
 # Tests
 
 
-@dataclass
-class Baseline:
-    type: str = "baseline"
+class Test:
+    """Specifies a run or set of runs."""
 
     def to_config(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -206,11 +205,19 @@ class Baseline:
         return [{}]
 
     def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
+        raise NotImplementedError()
+
+
+@dataclass
+class Baseline(Test):
+    type: str = "baseline"
+
+    def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
         return data.evaluate(model.model)
 
 
 @dataclass
-class _QuantiseModel:
+class _QuantiseModel(Test):
     fmt: M.FmtSpec
     error_weight: Literal["fisher", "parameter"] | None = None
 
@@ -218,11 +225,6 @@ class _QuantiseModel:
         d = dataclasses.asdict(self)
         d["fmt_str"] = str(self.fmt)
         return d
-
-    def args(
-        self, model: core.RequantisableModel, data: Dataset
-    ) -> list[dict[str, Any]]:
-        return [{}]
 
     def _quantise(
         self, model: nn.Module, error_weight: dict[str, Tensor] | None
@@ -273,6 +275,28 @@ class QuantiseVariable(_QuantiseModel):
 
 
 @dataclass
+class QuantiseHeuristic(_QuantiseModel):
+    highp_element_bits: float = 8
+    highp_names: tuple[str, ...] = ("embed_tokens", "lm_head")
+    highp_first_layers: int = 2
+    highp_last_layers: int = 2
+    type: str = "quantise_heuristic"
+
+    def _quantise(
+        self, model: nn.Module, error_weight: dict[str, Tensor] | None
+    ) -> dict[str, Any]:
+        return M.quantise_2d_heuristic(
+            model,
+            self.fmt,
+            highp_element_bits=self.highp_element_bits,
+            highp_names=self.highp_names,
+            highp_first_layers=self.highp_first_layers,
+            highp_last_layers=self.highp_last_layers,
+            error_weight=error_weight,
+        )
+
+
+@dataclass
 class QuantiseEachParam:
     fmt: M.FmtSpec
     type: str = "quantise_each_param"
@@ -308,9 +332,6 @@ class PerturbEachParam:
     distribution: str = "normal"
     type: str = "perturb_each_param"
 
-    def to_config(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
-
     def args(
         self, model: core.RequantisableModel, data: Dataset
     ) -> list[dict[str, Any]]:
@@ -330,11 +351,6 @@ class PerturbEachParam:
             return dict(rms=rms.item(), **data.evaluate(model.model))
         finally:
             model.reset_parameter(parameter)
-
-
-Test: TypeAlias = (
-    QuantiseFixed | QuantiseVariable | QuantiseEachParam | PerturbEachParam
-)
 
 
 @dataclass

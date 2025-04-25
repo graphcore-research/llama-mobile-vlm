@@ -88,7 +88,7 @@ def quantise_2d_fixed(
     model: nn.Module,
     fmt_spec: FmtSpec,
     error_weight: dict[str, Tensor] | None = None,
-    ignore: tuple[str] = DEFAULT_IGNORE,
+    ignore: tuple[str, ...] = DEFAULT_IGNORE,
 ) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
 
@@ -109,7 +109,7 @@ def quantise_2d_variable(
     fisher_sum: dict[str, float],
     error_weight: dict[str, Tensor] | None = None,
     min_element_bits: float | None = None,
-    ignore: tuple[str] = DEFAULT_IGNORE,
+    ignore: tuple[str, ...] = DEFAULT_IGNORE,
 ) -> dict[str, Any]:
     """Quantise a model using a variable scheme based on Fisher sensitivity.
 
@@ -136,7 +136,6 @@ def quantise_2d_variable(
         bit_width = float(bit_offset + 0.5 * fisher_mean_i.log())
         if fmt_spec.compressor is None:
             # Perhaps consider a tighter "global" method
-            # We also need a minimum bit width (e.g. 3 for FP)
             bit_width = int(round(bit_width))
         bit_width = max(bit_width, min_element_bits)
         _quantise_named_parameter(
@@ -144,5 +143,44 @@ def quantise_2d_variable(
             param,
             dataclasses.replace(fmt_spec, element_bits=bit_width),
             error_weight[name] if error_weight else None,
+        )
+    return _quantisation_log(model)
+
+
+def quantise_2d_heuristic(
+    model: nn.Module,
+    fmt_spec: F.Scaled,
+    highp_element_bits: float,
+    highp_names: tuple[str, ...],
+    highp_first_layers: int,
+    highp_last_layers: int,
+    error_weight: dict[str, Tensor] | None = None,
+    ignore: tuple[str, ...] = DEFAULT_IGNORE,
+) -> dict[str, Any]:
+    """Quantise a model, using higher precision for some layers.
+
+    Only quantise 2D parameters and ignore anything under "vision_model" (default).
+
+    Returns a dictionary describing the quantisation result.
+    """
+    try:
+        layers = model.model.layers
+    except AttributeError:
+        layers = model.language_model.model.layers
+    highp_params = set([])
+    for layer in (
+        layers[:highp_first_layers] + layers[len(layers) - highp_last_layers :]
+    ):
+        for param in layer.parameters():
+            highp_params.add(param)
+
+    for name, param in _named_parameters_to_quantise(model, ignore):
+        fmt_spec_i = fmt_spec
+        if any(p in highp_names for p in name.split(".")) or param in highp_params:
+            fmt_spec_i = dataclasses.replace(
+                fmt_spec_i, element_bits=highp_element_bits
+            )
+        _quantise_named_parameter(
+            name, param, fmt_spec_i, error_weight[name] if error_weight else None
         )
     return _quantisation_log(model)
