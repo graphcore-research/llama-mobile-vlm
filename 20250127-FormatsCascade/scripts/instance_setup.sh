@@ -2,6 +2,7 @@
 #  scp ~/.gitconfig INSTANCE:~
 #  mkdir nethome/USER
 #  cd nethome/USER && git clone git@github.com:graphcore-research/squashed-llama.git --branch notebooks SquashedLlama
+#  ln -s ~/nethome/USER/SquashedLlama/20250127-FormatsCascade/ work
 
 set -e
 set -o xtrace
