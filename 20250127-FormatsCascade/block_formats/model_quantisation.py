@@ -42,7 +42,7 @@ def quantise_parameter_(
         param[...] = new_value
 
 
-DEFAULT_IGNORE = ("vision_model",)
+DEFAULT_IGNORE = ("vision_model", "multi_modal_projector")
 
 
 def _named_parameters_to_quantise(
