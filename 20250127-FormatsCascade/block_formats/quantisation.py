@@ -327,6 +327,53 @@ class LUTFormat(ScalarFormat):
         return values[self.to_idx(x)]
 
 
+def parse(value: str) -> ScalarFormat:
+    if value == "FP32":
+        return FP32
+    if value == "FP16":
+        return FP16
+    if value == "BFLOAT16":
+        return BFLOAT16
+    m = re.match(r"^E(\d+)M(\d+)(-(RN|RZ|RI))?$", value)
+    if m:
+        exponent_bits = int(m.group(1))
+        mantissa_bits = int(m.group(2))
+        if exponent_bits == 0:
+            assert not m.group(3)
+            return IntFormat(1 + mantissa_bits)
+        if exponent_bits >= 2:
+            rounding = cast(
+                Literal["nearest", "to_inf", "to_zero"],
+                {
+                    None: "nearest",
+                    "-RN": "nearest",
+                    "-RZ": "to_zero",
+                    "-RI": "to_inf",
+                }[m.group(3)],
+            )
+            return FPFormat(exponent_bits, mantissa_bits, rounding)
+        raise ValueError(f"No format {value!r} available (note: E1M6 == E0M7)")
+    m = re.match(r"EXP(\d+)", value)
+    if m:
+        return ExpCeilFormat(int(m.group(1)))
+    raise ValueError(f"Couldn't parse {value!r}")
+
+
+def lut_function(fn: Callable[[Tensor], Tensor], bits: int, name: str) -> LUTFormat:
+    """A lookup table quantiser based on mapping [-1, 1] via a function"""
+    return LUTFormat.create(fn(torch.linspace(-1, 1, steps=2**bits)), name)
+
+
+def lut_grid(resolution: float, max: float) -> LUTFormat:
+    """A fixed-resolution grid that spans (-max, max)."""
+    half_n = torch.tensor(max).div(resolution).ceil().long().item()
+    values = torch.arange(-half_n, half_n + 1).mul(resolution)
+    return LUTFormat.create(values, f"GRID{{{resolution}}}")
+
+
+# Wrappers
+
+
 @dataclass
 class ScaledFormat(ScalarFormat):
     format: ScalarFormat
@@ -389,48 +436,49 @@ class RandomRotationFormat(TensorFormat):
         return self.format.count_bits_tensor(tensor)
 
 
-def parse(value: str) -> ScalarFormat:
-    if value == "FP32":
-        return FP32
-    if value == "FP16":
-        return FP16
-    if value == "BFLOAT16":
-        return BFLOAT16
-    m = re.match(r"^E(\d+)M(\d+)(-(RN|RZ|RI))?$", value)
-    if m:
-        exponent_bits = int(m.group(1))
-        mantissa_bits = int(m.group(2))
-        if exponent_bits == 0:
-            assert not m.group(3)
-            return IntFormat(1 + mantissa_bits)
-        if exponent_bits >= 2:
-            rounding = cast(
-                Literal["nearest", "to_inf", "to_zero"],
-                {
-                    None: "nearest",
-                    "-RN": "nearest",
-                    "-RZ": "to_zero",
-                    "-RI": "to_inf",
-                }[m.group(3)],
-            )
-            return FPFormat(exponent_bits, mantissa_bits, rounding)
-        raise ValueError(f"No format {value!r} available (note: E1M6 == E0M7)")
-    m = re.match(r"EXP(\d+)", value)
-    if m:
-        return ExpCeilFormat(int(m.group(1)))
-    raise ValueError(f"Couldn't parse {value!r}")
+@dataclass
+class OutlierFormat(TensorFormat):
+    format: TensorFormat
+    sparse_format: ScalarFormat
+    sparse_ratio: float
+    _type: str = "outlier"
 
+    def __str__(self) -> str:
+        sparse_ratio = format(
+            self.sparse_ratio, ".1%" if 1e-3 <= self.sparse_ratio else ".0e"
+        )
+        return f"{self.format}+S[{sparse_ratio}:{self.sparse_format}]"
 
-def lut_function(fn: Callable[[Tensor], Tensor], bits: int, name: str) -> LUTFormat:
-    """A lookup table quantiser based on mapping [-1, 1] via a function"""
-    return LUTFormat.create(fn(torch.linspace(-1, 1, steps=2**bits)), name)
+    def quantise(self, tensor: Tensor) -> Tensor:
+        n_sparse = self.n_sparse(tensor.shape)
+        if n_sparse:
+            # Find outliers to represent with sparity
+            tabs = tensor.abs().flatten()
+            sparse_idx = torch.where(
+                tabs >= tabs.neg().kthvalue(n_sparse - 1).values.neg()
+            )[0][:n_sparse]
+        else:
+            sparse_idx = torch.zeros(0, dtype=torch.long)
 
+        # Remove then restore sparse values
+        qtensor = tensor.flatten().clone()
+        qtensor[sparse_idx] = 0
+        qtensor = self.format.quantise(qtensor)
+        qtensor[sparse_idx] = self.sparse_format.quantise(tensor.flatten()[sparse_idx])
+        return qtensor.reshape(tensor.shape)
 
-def lut_grid(resolution: float, max: float) -> LUTFormat:
-    """A fixed-resolution grid that spans (-max, max)."""
-    half_n = torch.tensor(max).div(resolution).ceil().long().item()
-    values = torch.arange(-half_n, half_n + 1).mul(resolution)
-    return LUTFormat.create(values, f"GRID{{{resolution}}}")
+    def n_sparse(self, shape: Shape) -> int:
+        return int(self.sparse_ratio * math.prod(shape))
+
+    def count_bits(self, shape: Shape) -> int:
+        return self.format.count_bits(shape) + self.sparse_format.count_bits(
+            (self.n_sparse(shape),)
+        )
+
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        return self.format.count_bits_tensor(tensor) + self.sparse_format.count_bits(
+            (self.n_sparse(tensor.shape),)
+        )
 
 
 # Lloyd-Max
