@@ -1,9 +1,10 @@
 # Copyright (c) 2025 Graphcore Ltd. All rights reserved.
 
-import copy
 import dataclasses
 import multiprocessing
 import os
+import sys
+import traceback
 from dataclasses import dataclass
 from typing import Any, Iterable, TypeAlias
 
@@ -334,13 +335,13 @@ class Run:
 
 class _Runner:
     def __init__(self):
-        self.last_run = None
+        self.loaded_run = None
         self.model = None
         self.data = None
 
     def __call__(self, run: Run, progress: bool) -> None:
-        if self.last_run is None or any(
-            getattr(run, k) != getattr(self.last_run, k)
+        if self.loaded_run is None or any(
+            getattr(run, k) != getattr(self.loaded_run, k)
             for k in [
                 "model",
                 "sequence_length",
@@ -361,15 +362,22 @@ class _Runner:
                 kl_topk=run.kl_topk,
                 sequence_limit=run.sequence_limit,
             )
+            self.loaded_run = run
         self.model.reset()
         for run_args in tqdm.tqdm(
             run.test.args(self.model, self.data), disable=not progress
         ):
             config = dataclasses.asdict(run)
             config["test"].update(run_args)
-            with core.Experiment(config) as experiment:
-                experiment.summary(**run.test.run(self.model, self.data, **run_args))
-        self.last_run = run
+            config["test_id"] = core.generate_id()
+            try:
+                with core.Experiment(config) as experiment:
+                    experiment.summary(
+                        **run.test.run(self.model, self.data, **run_args)
+                    )
+            except Exception:
+                print(f"### Sweep run error for {config}", file=sys.stderr)
+                traceback.print_exc()
 
 
 _SWEEP_RUNNER: _Runner | None = None

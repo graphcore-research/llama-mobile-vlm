@@ -123,7 +123,7 @@ class AttrDict(dict):
         self.__dict__ = self
 
 
-def _generate_id() -> str:
+def generate_id() -> str:
     return "".join(random.choices(string.ascii_letters + string.digits, k=10))
 
 
@@ -206,7 +206,7 @@ class Experiment:
         self._db = _db()
         config = config.copy()
         self.experiment = config.pop("experiment")
-        self.run_id = _generate_id()
+        self.run_id = generate_id()
         self._record = dict(
             experiment=self.experiment,
             run_id=self.run_id,
