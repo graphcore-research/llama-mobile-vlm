@@ -212,7 +212,7 @@ class Baseline:
 @dataclass
 class _QuantiseModel:
     fmt: M.FmtSpec
-    error_weight: Literal["fisher"] | None = None
+    error_weight: Literal["fisher", "parameter"] | None = None
 
     def to_config(self) -> dict[str, Any]:
         d = dataclasses.asdict(self)
@@ -230,11 +230,16 @@ class _QuantiseModel:
         raise NotImplementedError()
 
     def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
-        error_weight = (
-            fisher.fetch_fisher_sqrt(model.model.config._name_or_path, model.device)
-            if self.error_weight == "fisher"
-            else None
-        )
+        if self.error_weight is None:
+            error_weight = None
+        elif self.error_weight == "fisher":
+            error_weight = fisher.fetch_fisher_sqrt(
+                model.model.config._name_or_path, model.device
+            )
+        elif self.error_weight == "parameter":
+            error_weight = {k: v.abs() for k, v in model.model.named_parameters()}
+        else:
+            raise ValueError(f"Unexpected error_weight={self.error_weight}")
         log = self._quantise(model.model, error_weight)
         return dict(**log, **data.evaluate(model.model))
 
