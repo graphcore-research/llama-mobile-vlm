@@ -8,16 +8,7 @@ from torch import tensor
 
 from .. import quantisation as Q
 
-
-def test_block_normalise() -> None:
-    # Check the case where the normalisation axis is all-zero
-    xs = torch.arange(3, dtype=torch.float32)[:, None].broadcast_to((3, 4))
-    for scaling in ["absmax", "rms"]:
-        torch.testing.assert_close(
-            Q.block_normalise(xs, (1, None), scaling, (-1, 1), Q.FP32)[0],
-            torch.tensor([0.0, 1.0, 1.0])[:, None].broadcast_to((3, 4)),
-            msg=f"scaling={scaling}",
-        )
+# Wrappers
 
 
 def test_random_rotation_format() -> None:
@@ -28,6 +19,26 @@ def test_random_rotation_format() -> None:
     rmse_rotated = Q.qrmse_norm(fmt, x).item()
     rmse_original = Q.qrmse_norm(fmt.format, x).item()
     assert rmse_rotated < 0.9 * rmse_original
+    assert fmt.count_bits((100,)) == 400
+
+
+def test_sparse_format() -> None:
+    x = torch.tensor([1, 2, -1, -1000, 0, 0, 0, 900]).float().view(2, -1)
+    fmt = Q.SparseFormat(Q.parse("E2M1"), Q.FP32, 1 / 4)
+    assert Q.qrmse_norm(fmt, x).item() == 0
+    assert Q.qrmse_norm(fmt.format, x).item() > 0.1
+    assert fmt.count_bits((2, 4)) == 8 * 4 + (8 / 4) * (32 + 32)
+
+
+def test_block_normalise() -> None:
+    # Check the case where the normalisation axis is all-zero
+    xs = torch.arange(3, dtype=torch.float32)[:, None].broadcast_to((3, 4))
+    for scaling in ["absmax", "rms"]:
+        torch.testing.assert_close(
+            Q.block_normalise(xs, (1, None), scaling, (-1, 1), Q.FP32)[0],
+            torch.tensor([0.0, 1.0, 1.0])[:, None].broadcast_to((3, 4)),
+            msg=f"scaling={scaling}",
+        )
 
 
 def test_linear_scaling_format() -> None:

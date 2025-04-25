@@ -437,7 +437,9 @@ class RandomRotationFormat(TensorFormat):
 
 
 @dataclass
-class OutlierFormat(TensorFormat):
+class SparseFormat(TensorFormat):
+    """A format wrapper that first removes a fixed percentage of absmax "outliers"."""
+
     format: TensorFormat
     sparse_format: ScalarFormat
     sparse_ratio: float
@@ -452,11 +454,9 @@ class OutlierFormat(TensorFormat):
     def quantise(self, tensor: Tensor) -> Tensor:
         n_sparse = self.n_sparse(tensor.shape)
         if n_sparse:
-            # Find outliers to represent with sparity
-            tabs = tensor.abs().flatten()
-            sparse_idx = torch.where(
-                tabs >= tabs.neg().kthvalue(n_sparse - 1).values.neg()
-            )[0][:n_sparse]
+            sparse_idx = torch.topk(
+                tensor.abs().flatten(), n_sparse, sorted=False
+            ).indices
         else:
             sparse_idx = torch.zeros(0, dtype=torch.long)
 
@@ -470,14 +470,19 @@ class OutlierFormat(TensorFormat):
     def n_sparse(self, shape: Shape) -> int:
         return int(self.sparse_ratio * math.prod(shape))
 
+    def count_sparse_bits(self, n_sparse: int) -> int:
+        sparse_value_bits = self.sparse_format.count_bits((n_sparse,))
+        sparse_mask_bits = 32 * n_sparse  # flat-COO format
+        return sparse_value_bits + sparse_mask_bits
+
     def count_bits(self, shape: Shape) -> int:
-        return self.format.count_bits(shape) + self.sparse_format.count_bits(
-            (self.n_sparse(shape),)
+        return self.format.count_bits(shape) + self.count_sparse_bits(
+            self.n_sparse(shape)
         )
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
-        return self.format.count_bits_tensor(tensor) + self.sparse_format.count_bits(
-            (self.n_sparse(tensor.shape),)
+        return self.format.count_bits_tensor(tensor) + self.count_sparse_bits(
+            self.n_sparse(tensor.shape)
         )
 
 
@@ -952,69 +957,6 @@ class LinearScalingFormat(TensorFormat):
     def quantise(self, tensor: Tensor) -> Tensor:
         scaled_tensor, scale = self.normalise(tensor)
         return self.element_format.quantise(scaled_tensor) * scale
-
-
-@dataclass
-class ChannelAndSparseFormat(TensorFormat):
-    """A scheme where input/output channels are scaled & outliers stored separately."""
-
-    element_format: ScalarFormat
-    scale_format: TensorFormat
-    scale_dim: Optional[int]
-    sparse_format: ScalarFormat
-    sparse_ratio: float
-
-    _type: str = "channel_and_sparse"
-
-    def __str__(self) -> str:
-        return (
-            f"{self.element_format}{{dim={self.scale_dim}:{self.scale_format}}}"
-            f"+{self.sparse_format}{{{self.sparse_ratio:.1%}}}"
-        )
-
-    def n_sparse(self, shape: Shape) -> int:
-        return int(self.sparse_ratio * math.prod(shape))
-
-    def count_bits(self, shape: Shape) -> int:
-        element_bits = self.element_format.count_bits(shape)
-        scale_bits = self.scale_format.count_bits(
-            () if self.scale_dim is None else (shape[self.scale_dim],)
-        )
-        n_sparse = self.n_sparse(shape)
-        sparse_value_bits = self.sparse_format.count_bits((n_sparse,))
-        sparse_mask_bits = 32 * n_sparse  # flat-COO format
-        return element_bits + scale_bits + sparse_value_bits + sparse_mask_bits
-
-    def quantise(self, tensor: Tensor) -> Tensor:
-        n_sparse = self.n_sparse(tensor.shape)
-        reduce_dims = tuple(d for d in range(tensor.ndim) if d != self.scale_dim)
-
-        if n_sparse:
-            # Find outliers to represent with sparity
-            rms_ratio = (
-                tensor.div(tensor.pow(2).mean(dim=reduce_dims, keepdim=True).sqrt())
-                .abs_()
-                .flatten()
-            )
-            sparse_idx = torch.where(
-                rms_ratio >= rms_ratio.neg().kthvalue(n_sparse - 1).values.neg()
-            )[0][:n_sparse]
-        else:
-            sparse_idx = torch.zeros(0, dtype=torch.long)
-
-        # Perform channel quantisation, except for sparse values
-        qtensor = tensor.flatten().clone()
-        qtensor[sparse_idx] = 0
-        scale = self.scale_format.quantise(
-            qtensor.reshape(tensor.shape)
-            .pow(2)
-            .mean(dim=reduce_dims, keepdim=True)
-            .sqrt()
-            .broadcast_to(tensor.shape)
-        ).flatten()
-        qtensor = self.element_format.quantise(qtensor / scale) * scale
-        qtensor[sparse_idx] = self.sparse_format.quantise(tensor.flatten()[sparse_idx])
-        return qtensor.reshape(tensor.shape)
 
 
 # "Compression" formats
