@@ -15,6 +15,7 @@ if __name__ == "__main__":
             ("laplace", None, {}),
             ("t", None, {}),
             ("t", None, dict(df=10)),
+            ("t", None, dict(df=30)),
             ("lloyd_max", None, {}),
         ]:
             for mode_args in (
