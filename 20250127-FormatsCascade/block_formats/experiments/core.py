@@ -150,6 +150,15 @@ def _device_info() -> dict[str, Any]:
         return {}
 
 
+def _dump_error(error: Exception) -> dict[str, Any]:
+    return dict(
+        type=type(error).__qualname__,
+        message=str(error),
+        trace=traceback.format_tb(error.__traceback__),
+        **(dict(cause=_dump_error(error.__cause__)) if error.__cause__ else {}),
+    )
+
+
 def _to_db(value: Any, prefix: tuple[Any] = ()) -> Any:
     if isinstance(
         value, (str, int, decimal.Decimal, bool, type(None), bytes, bytearray)
@@ -257,13 +266,7 @@ class Experiment:
         tb: TracebackType | None,
     ) -> None:
         if exc_value:
-            self._record.update(
-                error=dict(
-                    type=exc_type.__qualname__,
-                    message=str(exc_value),
-                    trace=traceback.format_tb(tb),
-                ),
-            )
+            self._record.update(error=_dump_error(exc_value))
             self._record["meta"].update(status="failed")
         else:
             self._record["meta"].update(status="finished")

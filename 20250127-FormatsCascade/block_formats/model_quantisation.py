@@ -6,7 +6,7 @@ import dataclasses
 from typing import Any
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 
 from . import fit as F
 from . import quantisation as Q
@@ -14,7 +14,9 @@ from . import quantisation as Q
 FmtSpec = Q.TensorFormat | F.Scaled
 
 
-def quantise_parameter_(param: nn.Parameter, fmt_spec: FmtSpec) -> None:
+def quantise_parameter_(
+    param: nn.Parameter, fmt_spec: FmtSpec, error_weight: Tensor | None = None
+) -> None:
     """Quantise a parameter in-place.
 
     Attaches a dictionary containing quantisation stats under `param._quantised`.
@@ -23,9 +25,14 @@ def quantise_parameter_(param: nn.Parameter, fmt_spec: FmtSpec) -> None:
         raise ValueError(f"Param of shape {tuple(param.shape)} was already quantised")
     with torch.no_grad():
         if isinstance(fmt_spec, Q.TensorFormat):
+            if error_weight is not None:
+                raise ValueError(
+                    "Cannot use `quantise_parameter_` with a Q.TensorFormat"
+                    " and error_weight, which requires a F.Scaled."
+                )
             fmt = fmt_spec
         elif isinstance(fmt_spec, F.Scaled):
-            fmt = fmt_spec.fit(param)
+            fmt = fmt_spec.fit(param, error_weight)
         new_value = fmt.quantise(param)
         param._quantised = dict(
             bits=fmt.count_bits_tensor(param),
@@ -70,17 +77,18 @@ def _quantisation_log(model: nn.Module) -> dict[str, Any]:
     return dict(bits_per_param=bits_per_param, params=log)
 
 
-def _quantise_named_parameter_(
-    name: str, param: nn.Parameter, fmt_spec: FmtSpec
-) -> None:
+def _quantise_named_parameter(name: str, *args: Any, **kwargs: Any) -> None:
     try:
-        quantise_parameter_(param, fmt_spec)
+        quantise_parameter_(*args, **kwargs)
     except Exception as e:
         raise ValueError(f"Failed to quantise {name!r}") from e
 
 
 def quantise_2d_fixed(
-    model: nn.Module, fmt_spec: FmtSpec, ignore: tuple[str] = DEFAULT_IGNORE
+    model: nn.Module,
+    fmt_spec: FmtSpec,
+    error_weight: dict[str, Tensor] | None = None,
+    ignore: tuple[str] = DEFAULT_IGNORE,
 ) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
 
@@ -89,7 +97,9 @@ def quantise_2d_fixed(
     Returns a dictionary describing the quantisation result.
     """
     for name, param in _named_parameters_to_quantise(model, ignore):
-        _quantise_named_parameter_(name, param, fmt_spec)
+        _quantise_named_parameter(
+            name, param, fmt_spec, error_weight[name] if error_weight else None
+        )
     return _quantisation_log(model)
 
 
@@ -97,8 +107,9 @@ def quantise_2d_variable(
     model: nn.Module,
     fmt_spec: F.Scaled,
     fisher_sum: dict[str, float],
-    ignore: tuple[str] = DEFAULT_IGNORE,
+    error_weight: dict[str, Tensor] | None = None,
     min_element_bits: float | None = None,
+    ignore: tuple[str] = DEFAULT_IGNORE,
 ) -> dict[str, Any]:
     """Quantise a model using a variable scheme based on Fisher sensitivity.
 
@@ -128,7 +139,10 @@ def quantise_2d_variable(
             # We also need a minimum bit width (e.g. 3 for FP)
             bit_width = int(round(bit_width))
         bit_width = max(bit_width, min_element_bits)
-        _quantise_named_parameter_(
-            name, param, dataclasses.replace(fmt_spec, element_bits=bit_width)
+        _quantise_named_parameter(
+            name,
+            param,
+            dataclasses.replace(fmt_spec, element_bits=bit_width),
+            error_weight[name] if error_weight else None,
         )
     return _quantisation_log(model)

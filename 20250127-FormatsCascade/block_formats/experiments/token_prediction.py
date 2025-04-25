@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 from dataclasses import dataclass
-from typing import Any, Iterable, TypeAlias
+from typing import Any, Iterable, Literal, TypeAlias
 
 import datasets
 import torch
@@ -210,9 +210,9 @@ class Baseline:
 
 
 @dataclass
-class QuantiseFixed:
+class _QuantiseModel:
     fmt: M.FmtSpec
-    type: str = "quantise_fixed"
+    error_weight: Literal["fisher"] | None = None
 
     def to_config(self) -> dict[str, Any]:
         d = dataclasses.asdict(self)
@@ -224,35 +224,47 @@ class QuantiseFixed:
     ) -> list[dict[str, Any]]:
         return [{}]
 
+    def _quantise(
+        self, model: nn.Module, error_weight: dict[str, Tensor] | None
+    ) -> dict[str, Any]:
+        raise NotImplementedError()
+
     def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
-        log = M.quantise_2d_fixed(model.model, self.fmt)
+        error_weight = (
+            fisher.fetch_fisher_sqrt(model.model.config._name_or_path, model.device)
+            if self.error_weight == "fisher"
+            else None
+        )
+        log = self._quantise(model.model, error_weight)
         return dict(**log, **data.evaluate(model.model))
 
 
 @dataclass
-class QuantiseVariable:
-    fmt: M.FmtSpec
+class QuantiseFixed(_QuantiseModel):
+    type: str = "quantise_fixed"
+
+    def _quantise(
+        self, model: nn.Module, error_weight: dict[str, Tensor] | None
+    ) -> dict[str, Any]:
+        return M.quantise_2d_fixed(model, self.fmt, error_weight=error_weight)
+
+
+@dataclass
+class QuantiseVariable(_QuantiseModel):
     min_element_bits: float | None = None
     type: str = "quantise_variable"
 
-    def to_config(self) -> dict[str, Any]:
-        d = dataclasses.asdict(self)
-        d["fmt_str"] = str(self.fmt)
-        return d
-
-    def args(
-        self, model: core.RequantisableModel, data: Dataset
-    ) -> list[dict[str, Any]]:
-        return [{}]
-
-    def run(self, model: core.RequantisableModel, data: Dataset) -> dict[str, Any]:
-        log = M.quantise_2d_variable(
-            model.model,
+    def _quantise(
+        self, model: nn.Module, error_weight: dict[str, Tensor] | None
+    ) -> dict[str, Any]:
+        fisher_sum = fisher.fetch_fisher_sum(model.config._name_or_path)
+        return M.quantise_2d_variable(
+            model,
             self.fmt,
-            fisher.fetch_fisher_sum(model.model.config._name_or_path),
+            fisher_sum=fisher_sum,
             min_element_bits=self.min_element_bits,
+            error_weight=error_weight,
         )
-        return dict(**log, **data.evaluate(model.model))
 
 
 @dataclass

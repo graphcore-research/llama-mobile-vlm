@@ -58,13 +58,13 @@ class Scaled:
             f"{{{block}:{self.scale_format}:{self.scaling}}}{sparse}"
         )
 
-    def fit(self, tensor: Tensor, weight: Tensor | None = None) -> Q.TensorFormat:
+    def fit(self, tensor: Tensor, error_weight: Tensor | None = None) -> Q.TensorFormat:
         if self.compressor is not None:
             if self.element_family != "int" or self.args:
                 raise ValueError(
                     'fit.Scaled with compression only supports element_family="int", args={}'
                 )
-            if weight is not None:
+            if error_weight is not None:
                 raise ValueError(
                     "fit.Scaled with compression doesn't support error weighting"
                 )
@@ -80,7 +80,7 @@ class Scaled:
             )
         return _scaled_quantiser(
             tensor,
-            weight=weight,
+            error_weight=error_weight,
             element_bits=self.element_bits,
             element_family=self.element_family,
             scale_format=self.scale_format,
@@ -95,14 +95,14 @@ class Scaled:
 def _fit_scale(
     tensor: Tensor,
     format: Q.TensorFormat,
-    weight: Tensor | None,
+    error_weight: Tensor | None,
     bounds: tuple[float, float],
 ) -> Q.ScaledFormat:
     """Wrap `format` in a `ScaledFormat` that is tuned to optimise RMSE."""
 
     fmt = lambda log_s: Q.ScaledFormat(format, 2**log_s)
     opt = scipy.optimize.minimize_scalar(
-        lambda log_s: Q.qrmse_norm(fmt(log_s), tensor, weight=weight).item(),
+        lambda log_s: Q.qrmse_norm(fmt(log_s), tensor, weight=error_weight).item(),
         bounds=(log2(bounds[0]), log2(bounds[1])),
         options=dict(xatol=0.1),
     )
@@ -135,9 +135,8 @@ def _compressed_scaled_quantiser(
     )
 
     def fmt(b: float) -> Q.CompressedLUTFormat:
-        # Use an odd number of grid datapoints, because it's sometimes very important to
-        # represent zero
-        # Note: don't use train_grid, since it rounds up the element range > absmax,
+        # Use an odd number of grid datapoints to represent zero (can be critical)
+        # Don't use train_grid, since it rounds up the element range > absmax,
         # which causes problems with block-absmax scaling
         n = round((2**b) / 2) * 2 + 1
         amax = tensor.abs().max() if scaling == "rms" else 1
@@ -166,7 +165,7 @@ def _compressed_scaled_quantiser(
 
 def _scaled_quantiser(
     tensor: Tensor,
-    weight: Tensor | None,
+    error_weight: Tensor | None,
     element_bits: float,
     element_family: Literal["int", "fp", "normal", "laplace", "t", "lloyd_max"],
     scale_format: Q.TensorFormat,
@@ -193,7 +192,9 @@ def _scaled_quantiser(
         args = args.copy()
         args.setdefault("init", "kmeans++" if scaling == "rms" else "uniform_minmax")
         args.setdefault("threshold", 1e-4)
-        element_format = Q.lut_lloyd_max(tensor, element_bits, weight=weight, **args)
+        element_format = Q.lut_lloyd_max(
+            tensor, element_bits, weight=error_weight, **args
+        )
     else:
         if scaling == "rms":
             base_scale = (
@@ -202,7 +203,7 @@ def _scaled_quantiser(
                 else 1.0
             )
             fit_scale = lambda fmt: _fit_scale(
-                tensor, fmt, weight, (base_scale / 16, base_scale * 16)
+                tensor, fmt, error_weight, (base_scale / 16, base_scale * 16)
             )
         else:
             fit_scale = lambda fmt: fmt
@@ -231,7 +232,9 @@ def _scaled_quantiser(
                 ]
                 element_format = min(
                     fmts,
-                    key=lambda fmt: Q.qrmse_norm(fmt, tensor, weight=weight).item(),
+                    key=lambda fmt: Q.qrmse_norm(
+                        fmt, tensor, weight=error_weight
+                    ).item(),
                 )
 
         elif element_family == "t":
@@ -242,7 +245,7 @@ def _scaled_quantiser(
                 fmt = lambda log2df: fit_scale(Q.crd_t(element_bits, 2**log2df, **args))
                 opt = scipy.optimize.minimize_scalar(
                     lambda log2df: Q.qrmse_norm(
-                        fmt(log2df), tensor, weight=weight
+                        fmt(log2df), tensor, weight=error_weight
                     ).item(),
                     bounds=(log2(3), log2(100)),
                     options=dict(xatol=0.1),
