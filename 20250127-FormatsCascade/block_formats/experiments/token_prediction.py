@@ -401,7 +401,7 @@ class _Runner:
             run.test.args(self.model, self.data), disable=not progress
         ):
             config = dataclasses.asdict(run)
-            config["test"].update(run_args)
+            config["test"] = dict(**run.test.to_config(), **run_args)
             config["test_id"] = core.generate_id()
             try:
                 with core.Experiment(config) as experiment:
