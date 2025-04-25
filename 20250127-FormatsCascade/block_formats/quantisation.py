@@ -445,6 +445,24 @@ class SparseFormat(TensorFormat):
     sparse_ratio: float
     _type: str = "outlier"
 
+    @staticmethod
+    def n_sparse(shape: Shape, sparse_ratio: float) -> int:
+        return int(sparse_ratio * math.prod(shape))
+
+    @classmethod
+    def split(
+        cls, tensor: Tensor, sparse_ratio: float
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Split-out and zero sparse (absmax) values.
+
+        returns -- `(dense, sparse_idx, sparse_values)`
+        """
+        n_sparse = cls.n_sparse(tensor.shape, sparse_ratio)
+        sparse_idx = torch.topk(tensor.abs().flatten(), n_sparse, sorted=False).indices
+        dense = tensor.clone()
+        dense.flatten()[sparse_idx] = 0
+        return dense, sparse_idx, tensor.flatten()[sparse_idx]
+
     def __str__(self) -> str:
         sparse_ratio = format(
             self.sparse_ratio, ".1%" if 1e-3 <= self.sparse_ratio else ".0e"
@@ -452,37 +470,23 @@ class SparseFormat(TensorFormat):
         return f"{self.format}+S[{sparse_ratio}:{self.sparse_format}]"
 
     def quantise(self, tensor: Tensor) -> Tensor:
-        n_sparse = self.n_sparse(tensor.shape)
-        if n_sparse:
-            sparse_idx = torch.topk(
-                tensor.abs().flatten(), n_sparse, sorted=False
-            ).indices
-        else:
-            sparse_idx = torch.zeros(0, dtype=torch.long)
+        tensor, sparse_idx, sparse_values = self.split(tensor, self.sparse_ratio)
+        tensor = self.format.quantise(tensor)
+        tensor.flatten()[sparse_idx] = self.sparse_format.quantise(sparse_values)
+        return tensor
 
-        # Remove then restore sparse values
-        qtensor = tensor.flatten().clone()
-        qtensor[sparse_idx] = 0
-        qtensor = self.format.quantise(qtensor)
-        qtensor[sparse_idx] = self.sparse_format.quantise(tensor.flatten()[sparse_idx])
-        return qtensor.reshape(tensor.shape)
-
-    def n_sparse(self, shape: Shape) -> int:
-        return int(self.sparse_ratio * math.prod(shape))
-
-    def count_sparse_bits(self, n_sparse: int) -> int:
+    def count_sparse_bits(self, shape: Shape) -> int:
+        n_sparse = self.n_sparse(shape, self.sparse_ratio)
         sparse_value_bits = self.sparse_format.count_bits((n_sparse,))
         sparse_mask_bits = 32 * n_sparse  # flat-COO format
         return sparse_value_bits + sparse_mask_bits
 
     def count_bits(self, shape: Shape) -> int:
-        return self.format.count_bits(shape) + self.count_sparse_bits(
-            self.n_sparse(shape)
-        )
+        return self.format.count_bits(shape) + self.count_sparse_bits(shape)
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
         return self.format.count_bits_tensor(tensor) + self.count_sparse_bits(
-            self.n_sparse(tensor.shape)
+            tensor.shape
         )
 
 
@@ -859,6 +863,12 @@ def block_normalise(
 ) -> tuple[Tensor, Tuple]:
     """Normalise the tensor, returning the normalised tensor & scale."""
 
+    if tensor.ndim != len(block_shape):
+        raise ValueError(
+            f"block_normalise tensor shape {tuple(tensor.shape)}"
+            f" must be the same rank as block_shape {block_shape}"
+        )
+
     def _get_scale(block_tensor: Tensor) -> Tensor:
         """Reduce over odd dimensions (1, 3, ...) to get the scale."""
         block_dims = tuple(range(1, block_tensor.ndim, 2))
@@ -988,7 +998,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
         assert self.model_logp.exp().sum().sub(1).abs().item() < 1e-4
 
     def __str__(self) -> str:
-        return f"{self.lut}+Z[{self.compressor}]"
+        return f"{self.lut}+Z{self.compressor}"
 
     @property
     def range(self) -> tuple[float, float]:
