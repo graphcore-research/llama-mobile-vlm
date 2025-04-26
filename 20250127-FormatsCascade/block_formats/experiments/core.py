@@ -22,6 +22,7 @@ import boto3.dynamodb.conditions as dbc
 import boto3.dynamodb.table
 import numpy as np
 import torch
+import tqdm
 import transformers
 from torch import Tensor, nn
 
@@ -275,15 +276,17 @@ class Experiment:
 
 
 def _call_paginated(
-    db: boto3.dynamodb.table.TableResource, method: str, **args: Any
+    db: boto3.dynamodb.table.TableResource, method: str, _progress: bool, **args: Any
 ) -> Iterable[Any]:
     start = {}
-    while True:
-        response = getattr(db, method)(**args, **start)
-        yield from response["Items"]
-        if "LastEvaluatedKey" not in response:
-            break
-        start = dict(ExclusiveStartKey=response["LastEvaluatedKey"])
+    with tqdm.tqdm(desc=method, disable=not _progress) as pbar:
+        while True:
+            response = getattr(db, method)(**args, **start)
+            pbar.update(len(response["Items"]))
+            yield from response["Items"]
+            if "LastEvaluatedKey" not in response:
+                break
+            start = dict(ExclusiveStartKey=response["LastEvaluatedKey"])
 
 
 def _run_from_db(run: dict[str, Any]) -> dict[str, Any]:
@@ -301,10 +304,13 @@ def run(id: str) -> dict[str, Any]:
     return _run_from_db(response["Item"])
 
 
-def runs(experiment: str) -> list[dict[str, Any]]:
+def runs(experiment: str, progress: bool = False) -> list[dict[str, Any]]:
     """Fetch all runs for a given experiment."""
     items = _call_paginated(
-        _db(), "query", KeyConditionExpression=dbc.Key("experiment").eq(experiment)
+        _db(),
+        "query",
+        KeyConditionExpression=dbc.Key("experiment").eq(experiment),
+        _progress=progress,
     )
     return sorted((_run_from_db(x) for x in items), key=lambda x: x["meta"]["time"])
 
@@ -315,10 +321,15 @@ def delete_run(id: str) -> None:
     _db().delete_item(Key=dict(experiment=experiment, run_id=run_id))
 
 
-def experiments() -> list[str]:
+def experiments(progress: bool = False) -> list[str]:
     """A list of all experiments in the database."""
     counts = collections.Counter(
         x["experiment"]
-        for x in _call_paginated(_db(), "scan", ProjectionExpression="experiment")
+        for x in _call_paginated(
+            _db(),
+            "scan",
+            ProjectionExpression="experiment",
+            _progress=progress,
+        )
     )
     return [dict(experiment=k, runs=counts[k]) for k in sorted(counts)]
