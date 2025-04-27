@@ -37,7 +37,6 @@ def quantise_parameter_(
         param._quantised = dict(
             bits=fmt.count_bits_tensor(param),
             rmse=(new_value - param).float().pow(2).mean().sqrt().item(),
-            rms=param.float().pow(2).mean().sqrt().item(),
         )
         param[...] = new_value
 
@@ -57,24 +56,16 @@ def _named_parameters_to_quantise(
 
 
 def _quantisation_log(model: nn.Module) -> dict[str, Any]:
-    log = {
-        name: (
-            dict(
-                nelement=param.nelement(),
-                **param._quantised,
-            )
-            if hasattr(param, "_quantised")
-            else dict(
-                nelement=param.nelement(),
-                bits=Q.TorchFormat(param.dtype).count_bits_tensor(param),
-            )
-        )
-        for name, param in model.named_parameters()
-    }
-    bits_per_param = sum(p["bits"] for p in log.values()) / sum(
-        p["nelement"] for p in log.values()
-    )
-    return dict(bits_per_param=bits_per_param, params=log)
+    log = {}
+    total_bits, total_nelement = 0, 0
+    for name, param in model.named_parameters():
+        if hasattr(param, "_quantised"):
+            log[name] = param._quantised
+            total_bits += param._quantised["bits"]
+        else:
+            total_bits += Q.TorchFormat(param.dtype).count_bits_tensor(param)
+        total_nelement += param.nelement()
+    return dict(bits_per_param=total_bits / total_nelement, params=log)
 
 
 def _quantise_named_parameter(name: str, *args: Any, **kwargs: Any) -> None:
