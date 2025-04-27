@@ -44,7 +44,9 @@ if __name__ == "__main__":
                                     compressor=compressor,
                                     args=dict(**args, **mode_args),
                                 )
-                                for error_weight in [None, "fisher"]:
+                                for error_weight in [None] + (
+                                    ["fisher"] if fmt.supports_error_weight else []
+                                ):
                                     for test_cls in [
                                         ET.QuantiseFixed,
                                         ET.QuantiseVariable,

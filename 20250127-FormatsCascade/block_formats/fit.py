@@ -54,19 +54,38 @@ class Scaled:
             else ""
         )
         return (
-            f"{self.element_bits}b-{self.element_family}{args}{compress}"
+            f"{self.element_bits:.3g}b-{self.element_family}{args}{compress}"
             f"{{{block}:{self.scale_format}:{self.scaling}}}{sparse}"
         )
 
+    @property
+    def supports_error_weight(self) -> bool:
+        """We only support `error_weight is not None` when there is an optimisation to perform.
+
+        E.g. element_family=lloyd_max optimises quantisation bins,
+             element_family=fp/t optimise exponent_bits/df respectively (unless specified),
+             scaling=rms optimises format scale.
+        """
+        if self.compressor is not None:
+            return False
+        if self.element_family == "lloyd_max":
+            return True
+        if self.element_family == "fp" and "exponent_bits" not in self.args:
+            return True
+        if self.element_family == "t" and "df" not in self.args:
+            return True
+        if self.scaling == "rms":
+            return True
+        return False
+
     def fit(self, tensor: Tensor, error_weight: Tensor | None = None) -> Q.TensorFormat:
+        if error_weight is not None and not self.supports_error_weight:
+            raise ValueError(f"fit.Scaled({self}) doesn't support `error_weight`")
+
         if self.compressor is not None:
             if self.element_family != "int" or self.args:
                 raise ValueError(
                     'fit.Scaled with compression only supports element_family="int", args={}'
-                )
-            if error_weight is not None:
-                raise ValueError(
-                    "fit.Scaled with compression doesn't support error weighting"
                 )
             return _compressed_scaled_quantiser(
                 tensor,
