@@ -260,7 +260,7 @@ class IntFormat(ScalarFormat):
 
 @dataclass
 class ExpCeilFormat(ScalarFormat):
-    """An exponent-only format for positive numbers, with no zero."""
+    """An exponent-only format for positive numbers, with no zero, always rounding up."""
 
     bits_: int
     _type: str = "exp"
@@ -913,6 +913,7 @@ def block_normalise(
         .broadcast_to(blocked_shape)
         .reshape(tensor.shape)
     )
+    scale = torch.where(scale == 0, 1, scale)  # protect against /0
     return tensor / scale, scale
 
 

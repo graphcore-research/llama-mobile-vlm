@@ -27,7 +27,7 @@ if __name__ == "__main__":
                     ["signmax"] if (element_family, compressor) == ("int", None) else []
                 ):
                     for scale_format in [Q.BFLOAT16] + (
-                        [] if scaling == "rms" else [Q.parse("E7M0-RI")]
+                        [] if scaling == "rms" else [Q.parse("EXP8")]
                     ):
                         for block_shape in [(None, None)] + [
                             (1, b) for b in [None, 16, 32, 64, 128, 256]
