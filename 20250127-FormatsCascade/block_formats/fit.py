@@ -83,9 +83,9 @@ class Scaled:
             raise ValueError(f"fit.Scaled({self}) doesn't support `error_weight`")
 
         if self.compressor is not None:
-            if self.element_family != "int" or self.args:
+            if self.element_family != "int":
                 raise ValueError(
-                    'fit.Scaled with compression only supports element_family="int", args={}'
+                    'fit.Scaled with compression only supports element_family="int"'
                 )
             return _compressed_scaled_quantiser(
                 tensor,
@@ -94,6 +94,7 @@ class Scaled:
                 block_shape=self.block_shape,
                 scaling=self.scaling,
                 compressor=self.compressor,
+                args=self.args,
                 sparse_format=self.sparse_format,
                 sparse_ratio=self.sparse_ratio,
             )
@@ -128,6 +129,43 @@ def _fit_scale(
     return fmt(opt.x)
 
 
+def _find_compressed_grid_quantiser(
+    tensor: Tensor,
+    amax: Tensor,
+    compressor: Q.Compressor,
+    args: dict[str, Any],
+    target_bits: float,
+    max_n: int = 2**24,
+) -> Q.CompressedLUTFormat:
+    def fmt(half_n: float) -> Q.CompressedLUTFormat:
+        # Use an odd number of grid datapoints to represent zero (can be critical)
+        # Don't use train_grid, since it rounds up the element range > absmax,
+        # which causes problems with block-absmax scaling
+        n = round(half_n) * 2 + 1
+        return Q.CompressedLUTFormat.train(
+            Q.LUTFormat.create(torch.linspace(-amax, amax, n), f"GRID{{n={n:.0f}}}"),
+            tensor,
+            compressor=compressor,
+            **args,
+        )
+
+    # Line search for a half_n that is too large
+    # Start at a lower bound on half_n, based on a uniform distribution
+    half_n_max = 2 ** (target_bits - 1)
+    while fmt(half_n_max).count_bits_tensor(tensor) / tensor.nelement() < target_bits:
+        half_n_max *= 2
+        if half_n_max >= max_n // 2:
+            return fmt(half_n_max)  # degenerate case - give up
+
+    half_n = scipy.optimize.bisect(
+        lambda hn: fmt(hn).count_bits_tensor(tensor) / tensor.nelement() - target_bits,
+        half_n_max / 2,
+        half_n_max,
+        xtol=1,
+    )
+    return fmt(half_n)
+
+
 def _compressed_scaled_quantiser(
     tensor: Tensor,
     element_bits: float,
@@ -135,6 +173,7 @@ def _compressed_scaled_quantiser(
     block_shape: Q.BlockShape,
     scaling: Q.Scaling,
     compressor: Q.Compressor,
+    args: dict[str, Any],
     sparse_format: Q.TensorFormat | None,
     sparse_ratio: float,
 ) -> Q.TensorFormat:
@@ -142,6 +181,9 @@ def _compressed_scaled_quantiser(
 
     Search to find the grid resolution matching the target `element_bits`.
     """
+    args = args.copy()
+    # Default smoothing is 0, because we train the quantiser on all parameter values
+    args.setdefault("smoothing", 0)
 
     if sparse_ratio:
         tensor, _, _ = Q.SparseFormat.split(tensor, sparse_ratio)
@@ -152,30 +194,17 @@ def _compressed_scaled_quantiser(
         element_range=(-1, 1),
         scale_format=scale_format,
     )
-
-    def fmt(b: float) -> Q.CompressedLUTFormat:
-        # Use an odd number of grid datapoints to represent zero (can be critical)
-        # Don't use train_grid, since it rounds up the element range > absmax,
-        # which causes problems with block-absmax scaling
-        n = round((2**b) / 2) * 2 + 1
-        amax = tensor.abs().max() if scaling == "rms" else 1
-        return Q.CompressedLUTFormat.train(
-            Q.LUTFormat.create(torch.linspace(-amax, amax, n), f"GRID{{n={n:.0f}}}"),
-            tensor,
-            compressor=compressor,
-        )
-
-    opt = scipy.optimize.minimize_scalar(
-        lambda b: abs(
-            fmt(b).count_bits_tensor(tensor) / tensor.nelement() - element_bits
-        ),
-        # Note: +16 is for heavy-tailed distributions (fits Student-t, df >= 2)
-        bounds=(element_bits, element_bits + 16),
-        options=dict(xatol=0.01),
-    )
-
     format = Q.LinearScalingCompressionFormat(
-        fmt(opt.x), scale_format, block_shape, scaling
+        _find_compressed_grid_quantiser(
+            tensor,
+            tensor.abs().max() if scaling == "rms" else 1,
+            compressor,
+            args,
+            target_bits=element_bits,
+        ),
+        scale_format,
+        block_shape,
+        scaling,
     )
     if sparse_ratio:
         format = Q.SparseFormat(format, sparse_format, sparse_ratio)

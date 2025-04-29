@@ -315,6 +315,11 @@ def runs(experiment: str, progress: bool = False) -> list[dict[str, Any]]:
     return sorted((_run_from_db(x) for x in items), key=lambda x: x["meta"]["time"])
 
 
+def update_run(run: dict[str, Any]) -> None:
+    """Update the given run to reflect local changes (be careful!)"""
+    _db().put_item(Item=_to_db({k: v for k, v in run.items() if k != "id"}))
+
+
 def delete_run(id: str) -> None:
     """Remove the given run."""
     experiment, run_id = id.split("/")

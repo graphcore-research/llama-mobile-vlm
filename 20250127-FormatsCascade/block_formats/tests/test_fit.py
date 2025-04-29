@@ -9,7 +9,7 @@ from .. import quantisation as Q
 def test_scaled_quantiser() -> None:
     torch.manual_seed(100)
     x = 3 * torch.randn(2**16)
-    tol = 0.025
+    tol = 0.1
 
     # Compressed (RMS)
     fmt = F.Scaled(4, "int", Q.BFLOAT16, (None,), "rms", compressor="optimal").fit(x)
