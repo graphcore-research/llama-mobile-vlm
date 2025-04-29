@@ -181,10 +181,6 @@ def _compressed_scaled_quantiser(
 
     Search to find the grid resolution matching the target `element_bits`.
     """
-    args = args.copy()
-    # Default smoothing is 0, because we train the quantiser on all parameter values
-    args.setdefault("smoothing", 0)
-
     if sparse_ratio:
         tensor, _, _ = Q.SparseFormat.split(tensor, sparse_ratio)
     tensor, _ = Q.block_normalise(
