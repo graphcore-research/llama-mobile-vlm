@@ -395,6 +395,9 @@ class ScaledFormat(ScalarFormat):
     def quantise(self, tensor: Tensor) -> Tensor:
         return self.format.quantise(tensor / self.scale) * self.scale
 
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        return self.format.count_bits_tensor(tensor / self.scale)
+
 
 @dataclass
 class RandomRotationFormat(TensorFormat):
@@ -433,6 +436,7 @@ class RandomRotationFormat(TensorFormat):
         return self.format.count_bits(shape)
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
+        tensor, _ = self.rotate(tensor)
         return self.format.count_bits_tensor(tensor)
 
 
@@ -485,6 +489,7 @@ class SparseFormat(TensorFormat):
         return self.format.count_bits(shape) + self.count_sparse_bits(shape)
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
+        tensor, _, _ = self.split(tensor, self.sparse_ratio)
         return self.format.count_bits_tensor(tensor) + self.count_sparse_bits(
             tensor.shape
         )
@@ -956,6 +961,12 @@ class LinearScalingFormat(TensorFormat):
     def count_bits(self, shape: Shape) -> int:
         return self.element_format.count_bits(shape) + self._count_scale_bits(shape)
 
+    def count_bits_tensor(self, tensor: Tensor) -> float:
+        scaled_tensor, _ = self.normalise(tensor)
+        return self.element_format.count_bits_tensor(
+            scaled_tensor
+        ) + self._count_scale_bits(tensor.shape)
+
     def normalise(self, tensor: Tensor) -> tuple[Tensor, Tensor]:
         return block_normalise(
             tensor,
@@ -1072,19 +1083,4 @@ class CompressedLUTFormat(CompressedTensorFormat):
     ) -> "CompressedLUTFormat":
         return cls.train(
             lut_grid(resolution, data.abs().amax().item()), data=data, **args
-        )
-
-
-@dataclass
-class LinearScalingCompressionFormat(LinearScalingFormat):
-    """Note: requires self.element_format to be a CompressedFormat."""
-
-    def count_bits_tensor(self, tensor: Tensor) -> float:
-        scaled_tensor, _ = self.normalise(tensor)
-        element_bits = self.element_format.count_bits_tensor(scaled_tensor)
-        return element_bits + self._count_scale_bits(tensor.shape)
-
-    def count_bits(self, shape: Shape) -> int:
-        raise NotImplementedError(
-            "LinearScalingCompressionFormat `count_bits` depends on the data - use `count_bits_tensor` instead"
         )

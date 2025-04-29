@@ -190,7 +190,7 @@ def _compressed_scaled_quantiser(
         element_range=(-1, 1),
         scale_format=scale_format,
     )
-    format = Q.LinearScalingCompressionFormat(
+    format = Q.LinearScalingFormat(
         _find_compressed_grid_quantiser(
             tensor,
             tensor.abs().max() if scaling == "rms" else 1,
