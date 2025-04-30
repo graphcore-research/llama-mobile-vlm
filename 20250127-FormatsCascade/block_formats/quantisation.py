@@ -42,7 +42,6 @@ def rmse_norm(x: Tensor, qx: Tensor, weight: Tensor | None = None) -> Tensor:
     d2 = qx.to(torch.float32, copy=True).sub_(x).square_()
     x2 = x.square()
     if weight is not None:
-        weight = weight.to(torch.float32, copy=True).square_()
         d2.mul_(weight)
         x2.mul_(weight)
     return (d2.sum() / x2.sum()).sqrt()
@@ -294,13 +293,20 @@ class ExpCeilFormat(ScalarFormat):
 
 @dataclass
 class LUTFormat(ScalarFormat):
-    values: Tuple[float, ...]
+    values: tuple[float, ...]
     name: str
+    _range: tuple[float, float]
     _type: str = "lut"
 
     @classmethod
-    def create(cls, values: Tensor, name: str) -> "LUTFormat":
-        return cls(values=tuple(values.tolist()), name=name)
+    def create(
+        cls,
+        values: tuple[float, ...] | Tensor,
+        name: str,
+        range: tuple[float, float] | None = None,
+    ) -> "LUTFormat":
+        values = tuple(values.tolist() if isinstance(values, Tensor) else values)
+        return cls(values=values, name=name, _range=range or (min(values), max(values)))
 
     def __post_init__(self) -> None:
         self.values = tuple(self.values)
@@ -309,12 +315,12 @@ class LUTFormat(ScalarFormat):
         return f"LUT{int(math.ceil(self.bits))}[{self.name}]"
 
     @property
-    def bits(self) -> float:
-        return math.log2(len(self.values))
+    def range(self) -> tuple[float, float]:
+        return self._range
 
     @property
-    def range(self) -> tuple[float, float]:
-        return (min(self.values), max(self.values))
+    def bits(self) -> float:
+        return math.log2(len(self.values))
 
     def to_idx(self, x: Tensor) -> Tensor:
         # This has slightly worse accuracy if computed in x.dtype, so use float32
@@ -378,10 +384,23 @@ def lut_grid(resolution: float, max: float) -> LUTFormat:
 class ScaledFormat(ScalarFormat):
     format: ScalarFormat
     scale: float
+    _range: tuple[float, float]
     _type: str = "scaled"
 
+    @classmethod
+    def create(
+        cls,
+        format: ScalarFormat,
+        scale: float,
+        range: tuple[float, float] | None = None,
+    ) -> "ScaledFormat":
+        if range is None:
+            min_, max_ = format.range
+            range = (min_ * scale, max_ * scale)
+        return cls(format=format, scale=scale, _range=range)
+
     def __str__(self) -> str:
-        return f"{self.format}{{*{self.scale}}}"
+        return f"{self.format}{{*{self.scale:.3g}}}"
 
     @property
     def bits(self) -> float:
@@ -389,8 +408,7 @@ class ScaledFormat(ScalarFormat):
 
     @property
     def range(self) -> tuple[float, float]:
-        min_, max_ = self.format.range
-        return (min_ * self.scale, max_ * self.scale)
+        return self._range
 
     def quantise(self, tensor: Tensor) -> Tensor:
         return self.format.quantise(tensor / self.scale) * self.scale
@@ -560,6 +578,7 @@ def lut_lloyd_max(
     threshold: float,
     *,
     weight: Tensor | None = None,
+    range: tuple[float, float] | None = None,
     init: LloydMaxInit = "kmeans++",
     incremental: bool = True,
     max_samples: int | None = None,
@@ -626,7 +645,7 @@ def lut_lloyd_max(
                 break
             n *= 2
     assert (midpoints[:-1] <= midpoints[1:]).all().item()
-    return LUTFormat.create(midpoints, "LM")
+    return LUTFormat.create(midpoints, "LM", range=range)
 
 
 def nf_approx(bits: int) -> LUTFormat:
@@ -639,7 +658,7 @@ FP32 = TorchFormat(torch.float32)
 FP16 = TorchFormat(torch.float16)
 BFLOAT16 = TorchFormat(torch.bfloat16)
 # See: QLoRA [https://arxiv.org/abs/2305.14314]
-NF4 = LUTFormat(
+NF4 = LUTFormat.create(
     (
         -1.0,
         -0.6961928009986877,
@@ -760,7 +779,7 @@ def crd_t(
         cscale = ((df - 2) / cdof) ** 0.5
         return scipy.stats.t.ppf(p, cdof, scale=cscale)
 
-    name_df = f"{df:.0f}" if int(df) == df else str(df)
+    name_df = f"{df:.0f}" if int(df) == df else f"{df:.1f}"
     return crd_quantiser(
         int(round(2**bits)),
         scaling="rms",
@@ -842,7 +861,7 @@ def crd_block_t(
         a0, a1 = scipy.stats.t.cdf([-expected_max, expected_max], cdof, scale=cscale)
         return scipy.stats.t.ppf(a0 + p * (a1 - a0), cdof, scale=cscale) / expected_max
 
-    name_df = f"{df:.0f}" if int(df) == df else str(df)
+    name_df = f"{df:.0f}" if int(df) == df else f"{df:.1f}"
     return crd_quantiser(
         int(round(2**bits)),
         scaling=scaling,

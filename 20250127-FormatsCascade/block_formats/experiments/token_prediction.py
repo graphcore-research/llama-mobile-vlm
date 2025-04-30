@@ -235,7 +235,7 @@ class _QuantiseModel(Test):
         if self.error_weight is None:
             error_weight = None
         elif self.error_weight == "fisher":
-            error_weight = fisher.fetch_fisher_sqrt(
+            error_weight = fisher.fetch_fisher(
                 model.model.config._name_or_path, model.device
             )
         elif self.error_weight == "parameter":

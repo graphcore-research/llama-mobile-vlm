@@ -21,7 +21,7 @@ from . import core, token_prediction
 EXPERIMENT_DEFAULT = "20250423-fisher"
 
 
-def fetch_fisher_sqrt(
+def fetch_fisher(
     model_name: str, device: torch.device, experiment_name: str = EXPERIMENT_DEFAULT
 ) -> dict[str, Tensor]:
     file_name = f"{model_name.replace('/', '--')}.safetensors"
@@ -31,10 +31,7 @@ def fetch_fisher_sqrt(
             f"Fisher checkpoint for {model_name} expected at {path}."
             f"\nTry: `aws s3 sync s3://graphcore-research/2025-04-block-formats/{experiment_name}/{file_name} {path}"
         )
-    return {
-        k: v.sqrt_()
-        for k, v in safetensors.torch.load_file(path, device=str(device)).items()
-    }
+    return safetensors.torch.load_file(path, device=str(device))
 
 
 def fetch_fisher_sum(
