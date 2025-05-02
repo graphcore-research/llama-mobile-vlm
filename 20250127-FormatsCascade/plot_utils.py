@@ -80,8 +80,10 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
             "text.latex.preamble": "\n".join(
                 [
                     r"\usepackage{amsmath}",
+                    r"\usepackage{amsfonts}",
                     r"\usepackage{bm}",
                     r"\newcommand{\norm}[2]{\left \lVert #1 \right \rVert_{#2}}",
+                    r"\newcommand{\expectation}{\mathop{{}\mathbb{E}}}",
                 ]
             ),
             # General
