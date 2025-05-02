@@ -847,7 +847,7 @@ def crd_block_t(
 
     def icdf(p: Tensor, power: float) -> Tensor:
         expected_max = (
-            torch.tensor(block_size)
+            torch.tensor(block_size, dtype=torch.float64)  # .pow(df) is to blame
             .div(torch.pi)
             .log()
             .mul(2)
@@ -855,7 +855,7 @@ def crd_block_t(
             .mul(block_size)
             .pow(1 / df)
             .mul((df / (df - 2)) ** 0.5)
-        )
+        ).item()
         cdof = (df + 1 - 1 / power) * power
         cscale = (df / cdof) ** 0.5
         a0, a1 = scipy.stats.t.cdf([-expected_max, expected_max], cdof, scale=cscale)

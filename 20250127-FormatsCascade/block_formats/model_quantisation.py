@@ -35,6 +35,7 @@ def quantise_parameter_(
             fmt = fmt_spec.fit(param, error_weight)
         new_value = fmt.quantise(param)
         param._quantised = dict(
+            fmt=fmt,
             bits=fmt.count_bits_tensor(param),
             rmse=(new_value - param).float().pow(2).mean().sqrt().item(),
         )
@@ -55,12 +56,14 @@ def _named_parameters_to_quantise(
     return params
 
 
-def _quantisation_log(model: nn.Module) -> dict[str, Any]:
+def _quantisation_log(model: nn.Module, verbose: bool) -> dict[str, Any]:
     log = {}
     total_bits, total_nelement = 0, 0
     for name, param in model.named_parameters():
         if hasattr(param, "_quantised"):
-            log[name] = param._quantised
+            log[name] = param._quantised.copy()
+            if not verbose:
+                log[name].pop("fmt")
             total_bits += param._quantised["bits"]
         else:
             total_bits += Q.TorchFormat(param.dtype).count_bits_tensor(param)
@@ -80,6 +83,7 @@ def quantise_2d_fixed(
     fmt_spec: FmtSpec,
     error_weight: dict[str, Tensor] | None = None,
     ignore: tuple[str, ...] = DEFAULT_IGNORE,
+    verbose_log: bool = False,
 ) -> dict[str, Any]:
     """Quantise a model using a 'fixed' scheme.
 
@@ -88,10 +92,11 @@ def quantise_2d_fixed(
     Returns a dictionary describing the quantisation result.
     """
     for name, param in _named_parameters_to_quantise(model, ignore):
+        # print(name)
         _quantise_named_parameter(
             name, param, fmt_spec, error_weight[name] if error_weight else None
         )
-    return _quantisation_log(model)
+    return _quantisation_log(model, verbose=verbose_log)
 
 
 def quantise_2d_variable(
@@ -101,6 +106,7 @@ def quantise_2d_variable(
     error_weight: dict[str, Tensor] | None = None,
     min_element_bits: float | None = None,
     ignore: tuple[str, ...] = DEFAULT_IGNORE,
+    verbose_log: bool = False,
 ) -> dict[str, Any]:
     """Quantise a model using a variable scheme based on Fisher sensitivity.
 
@@ -139,7 +145,7 @@ def quantise_2d_variable(
             dataclasses.replace(fmt_spec, element_bits=bit_width),
             error_weight[name] if error_weight else None,
         )
-    return _quantisation_log(model)
+    return _quantisation_log(model, verbose=verbose_log)
 
 
 def quantise_2d_heuristic(
@@ -151,6 +157,7 @@ def quantise_2d_heuristic(
     highp_last_layers: int,
     error_weight: dict[str, Tensor] | None = None,
     ignore: tuple[str, ...] = DEFAULT_IGNORE,
+    verbose_log: bool = False,
 ) -> dict[str, Any]:
     """Quantise a model, using higher precision for some layers.
 
@@ -178,4 +185,4 @@ def quantise_2d_heuristic(
         _quantise_named_parameter(
             name, param, fmt_spec_i, error_weight[name] if error_weight else None
         )
-    return _quantisation_log(model)
+    return _quantisation_log(model, verbose=verbose_log)
