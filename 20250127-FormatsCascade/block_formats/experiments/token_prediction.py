@@ -332,6 +332,9 @@ class PerturbEachParam:
     distribution: str = "normal"
     type: str = "perturb_each_param"
 
+    def to_config(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
     def args(
         self, model: core.RequantisableModel, data: Dataset
     ) -> list[dict[str, Any]]:

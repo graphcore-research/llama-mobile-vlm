@@ -31,6 +31,21 @@ def scaled_hist(t: Tensor, bin_edges: Tensor, dim: tuple[int, ...] | None) -> Te
     )
 
 
+EXPERIMENT_DEFAULT = "20250423-weight-stats"
+
+
+def fetch_weight_stats(
+    model_name: str, experiment_name: str = EXPERIMENT_DEFAULT
+) -> dict[str, float]:
+    """Fetch the weight stats from a previous experiment."""
+    for run in core.runs(experiment_name):
+        if run.config.model == model_name and "weight_stats" in run.summary:
+            return run.summary.weight_stats
+    raise KeyError(
+        f"Weight stats for model {model_name!r} not found in experiment {experiment_name!r}"
+    )
+
+
 STUDENTT_FIT_SCALE_THRESHOLD = 0.001
 STUDENTT_FIT_DF_VALUES = torch.cat(
     [torch.arange(1, 10, 0.5), torch.arange(10, 20, 2), torch.arange(20, 100 + 1, 10)]
