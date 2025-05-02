@@ -276,7 +276,7 @@ class QuantiseVariable(_QuantiseModel):
 
 @dataclass
 class QuantiseHeuristic(_QuantiseModel):
-    highp_element_bits: float = 8
+    highp_add_bits: float = 2
     highp_names: tuple[str, ...] = ("embed_tokens", "lm_head")
     highp_first_layers: int = 2
     highp_last_layers: int = 2
@@ -288,7 +288,7 @@ class QuantiseHeuristic(_QuantiseModel):
         return M.quantise_2d_heuristic(
             model,
             self.fmt,
-            highp_element_bits=self.highp_element_bits,
+            highp_add_bits=self.highp_add_bits,
             highp_names=self.highp_names,
             highp_first_layers=self.highp_first_layers,
             highp_last_layers=self.highp_last_layers,

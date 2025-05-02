@@ -116,15 +116,19 @@ def quantise_2d_variable(
 
     params_to_quantise = _named_parameters_to_quantise(model, ignore)
     nelement = torch.tensor([p.nelement() for _, p in params_to_quantise])
+    rms = torch.tensor(
+        [
+            p.square().mean(dtype=torch.float32).sqrt().to(p.dtype)
+            for _, p in params_to_quantise
+        ]
+    )
     fisher_mean = torch.tensor(
         [fisher_sum[n] / p.nelement() for n, p in params_to_quantise]
     )
-    bit_offset = (
-        fmt_spec.element_bits
-        - 0.5 * fisher_mean.log().mul(nelement).sum() / nelement.sum()
-    )
-    for (name, param), fisher_mean_i in zip(params_to_quantise, fisher_mean):
-        bit_width = float(bit_offset + 0.5 * fisher_mean_i.log())
+    bit_delta = rms.log2() + 0.5 * fisher_mean.log2()
+    bit_offset = fmt_spec.element_bits - (bit_delta * nelement).sum() / nelement.sum()
+    for i, (name, param) in enumerate(params_to_quantise):
+        bit_width = float(bit_offset + bit_delta[i])
         if fmt_spec.compressor is None:
             # Perhaps consider a tighter "global" method
             bit_width = int(round(bit_width))
@@ -141,7 +145,7 @@ def quantise_2d_variable(
 def quantise_2d_heuristic(
     model: nn.Module,
     fmt_spec: F.Scaled,
-    highp_element_bits: float,
+    highp_add_bits: float,
     highp_names: tuple[str, ...],
     highp_first_layers: int,
     highp_last_layers: int,
@@ -169,7 +173,7 @@ def quantise_2d_heuristic(
         fmt_spec_i = fmt_spec
         if any(p in highp_names for p in name.split(".")) or param in highp_params:
             fmt_spec_i = dataclasses.replace(
-                fmt_spec_i, element_bits=highp_element_bits
+                fmt_spec_i, element_bits=fmt_spec.element_bits + highp_add_bits
             )
         _quantise_named_parameter(
             name, param, fmt_spec_i, error_weight[name] if error_weight else None
