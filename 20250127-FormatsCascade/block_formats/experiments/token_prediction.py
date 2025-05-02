@@ -313,6 +313,7 @@ class QuantiseEachParam:
             dict(parameter=name)
             for name, p in model.model.named_parameters()
             if p.ndim == 2
+            and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
         ]
 
     def run(
@@ -342,6 +343,7 @@ class PerturbEachParam:
             dict(parameter=name)
             for name, p in model.model.named_parameters()
             if p.ndim == 2
+            and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
         ]
 
     def run(
