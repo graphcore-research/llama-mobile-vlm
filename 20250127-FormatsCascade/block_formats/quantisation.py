@@ -326,7 +326,7 @@ class LUTFormat(ScalarFormat):
         # This has slightly worse accuracy if computed in x.dtype, so use float32
         values = torch.tensor(self.values, device=x.device)
         boundaries = (values[1:] + values[:-1]).div(2)
-        return torch.bucketize(x, boundaries)
+        return torch.bucketize(x, boundaries, out_int32=True)
 
     def quantise(self, x: Tensor) -> Tensor:
         values = torch.tensor(self.values, device=x.device, dtype=x.dtype)
