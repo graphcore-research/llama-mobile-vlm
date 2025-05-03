@@ -21,6 +21,8 @@ DISPLAY_NAMES = {
     "qrmse_norm": "$R$",
     "LM": "Lloyd-Max",
     "rms": "RMS",
+    "absmax": "Absmax",
+    "df": r"$\nu$",
     # Formats
     "BFLOAT16": r"\texttt{bfloat16}",
     "EXP8": r"\texttt{E8M0}",
@@ -181,7 +183,7 @@ def tidy(figure: matplotlib.figure.Figure) -> None:
 class Grid:
     rows: list[str | None]
     cols: list[str | None]
-    axes: np.ndarray[matplotlib.axes.Axes]
+    axes: np.ndarray[matplotlib.axes.Axes]  # [row, col]
     figure: matplotlib.figure.Figure
 
     def __iter__(self) -> Iterable[Any]:
@@ -201,13 +203,14 @@ def grid(
     cols: list[str | None] = [None],
     sharex: bool = False,
     sharey: bool = False,
+    height: float | None = None,
 ) -> Grid:
     """Create a grid of matplotlib plots (much like seaborn, but plainer if not simpler)."""
     figw, figh = matplotlib.rcParams["figure.figsize"]
     figure, axes = plt.subplots(
         nrows=len(rows),
         ncols=len(cols),
-        figsize=(figw, figh * len(rows)),
+        figsize=(figw, (height or figh) * len(rows)),
         sharex=sharex,
         sharey=sharey,
         squeeze=False,
