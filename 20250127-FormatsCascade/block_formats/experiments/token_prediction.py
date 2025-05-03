@@ -312,8 +312,7 @@ class QuantiseEachParam:
         return [
             dict(parameter=name)
             for name, p in model.model.named_parameters()
-            if p.ndim == 2
-            and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
+            if p.ndim == 2 and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
         ]
 
     def run(
@@ -342,8 +341,7 @@ class PerturbEachParam:
         return [
             dict(parameter=name)
             for name, p in model.model.named_parameters()
-            if p.ndim == 2
-            and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
+            if p.ndim == 2 and not any(p in M.DEFAULT_IGNORE for p in name.split("."))
         ]
 
     def run(
@@ -401,17 +399,19 @@ class _Runner:
                 sequence_limit=run.sequence_limit,
             )
             self.loaded_run = run
+
         self.model.reset()
+        test_id = core.generate_id()
         for run_args in tqdm.tqdm(
             run.test.args(self.model, self.data), disable=not progress
         ):
             config = dataclasses.asdict(run)
             config["test"] = dict(**run.test.to_config(), **run_args)
-            config["test_id"] = core.generate_id()
             try:
                 with core.Experiment(config) as experiment:
                     experiment.summary(
-                        **run.test.run(self.model, self.data, **run_args)
+                        **run.test.run(self.model, self.data, **run_args),
+                        test_id=test_id,
                     )
             except Exception:
                 print(f"### Sweep run error for {config}", file=sys.stderr)
