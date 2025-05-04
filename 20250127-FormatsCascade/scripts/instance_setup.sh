@@ -19,6 +19,7 @@ cp ~/nethome/${NETUSER}/.gitconfig ~
 grep -qxF 'alias va="source .venv/bin/activate"' ~/.bashrc || echo 'alias va="source .venv/bin/activate"' >> ~/.bashrc
 grep -qxF 'alias gs="git s"' ~/.bashrc || echo 'alias gs="git s"' >> ~/.bashrc
 grep -qxF 'alias gd="git diff"' ~/.bashrc || echo 'alias gd="git diff"' >> ~/.bashrc
+grep -qxF 'alias gdc="git diff --cached"' ~/.bashrc || echo 'alias gdc="git diff --cached"' >> ~/.bashrc
 
 [ -f ~/.aws/credentials ] || aws configure
 
