@@ -4,9 +4,44 @@ import dataclasses
 import json
 
 import torch
+from math import log2
 from torch import tensor
 
 from .. import quantisation as Q
+
+# Formats
+
+
+def test_int_format() -> None:
+    x = torch.linspace(-8, 8, 1001)
+
+    fmt = Q.IntFormat(log2(8))
+    assert str(fmt) == "E0M2"
+    assert fmt.range == (-4, 3)
+    assert set(fmt.quantise(x).tolist()) == set(range(-4, 3 + 1))
+
+    fmt = Q.IntFormat(log2(9))
+    assert fmt.range == (-4, 4)
+    assert set(fmt.quantise(x).tolist()) == set(range(-4, 4 + 1))
+
+    fmt = Q.IntFormat(log2(8), mode="symmetric")
+    assert str(fmt) == "E0M2-S"
+    assert fmt.range == (-3.5, 3.5)
+    assert sorted(set(fmt.quantise(x).tolist())) == [
+        -3.5,
+        -2.5,
+        -1.5,
+        -0.5,
+        0.5,
+        1.5,
+        2.5,
+        3.5,
+    ]
+
+    fmt = Q.IntFormat(log2(9), mode="symmetric")  # already symmetric
+    assert fmt.range == (-4, 4)
+    assert set(fmt.quantise(x).tolist()) == set(range(-4, 4 + 1))
+
 
 # Wrappers
 

@@ -233,15 +233,21 @@ class TorchFormat(ScalarFormat):
 @dataclass
 class IntFormat(ScalarFormat):
     bits_: float
+    mode: Literal["symmetric", "asymmetric"] = "asymmetric"
     _type: str = "int"
 
     def __post_init__(self) -> None:
+        assert self.mode in (
+            "symmetric",
+            "asymmetric",
+        ), f"unexpected IntFormat(mode={self.mode!r})"
         self.bits_ = math.log2(round(2.0**self.bits_))
 
     def __str__(self) -> str:
+        suffix = "-S" if self.mode == "symmetric" else ""
         if int(self.bits_) == self.bits_:
-            return f"E0M{self.bits_ - 1:.0f}"
-        return f"E0M{{{self.bits_ - 1:.2f}}}"
+            return f"E0M{self.bits_ - 1:.0f}{suffix}"
+        return f"E0M{{{self.bits_ - 1:.2f}}}{suffix}"
 
     @property
     def bits(self) -> float:
@@ -250,11 +256,15 @@ class IntFormat(ScalarFormat):
     @property
     def range(self) -> tuple[float, float]:
         n_values = int(round(2.0**self.bits_))
-        half_range = (n_values - 1) // 2
+        half_range = (
+            (n_values - 1) // 2 if self.mode == "asymmetric" else (n_values - 1) / 2
+        )
         return (-half_range - (2 * half_range + 1 < n_values), half_range)
 
     def quantise(self, x: Tensor) -> Tensor:
-        return torch.clip(torch.round(x), *self.range)
+        n_values = int(round(2.0**self.bits_))
+        offset = 0.5 if n_values % 2 == 0 and self.mode == "symmetric" else 0
+        return torch.clip(torch.round(x + offset) - offset, *self.range)
 
 
 @dataclass
