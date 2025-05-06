@@ -26,29 +26,25 @@ import tqdm
 import transformers
 from torch import Tensor, nn
 
-from .. import fit as F
-from .. import quantisation as Q
 
 # Sweeping
 
 MODELS = [
     # Llama
+    "meta-llama/Llama-3.1-8B",
     "meta-llama/Llama-3.2-1B",
     "meta-llama/Llama-3.2-3B",
-    "meta-llama/Llama-3.1-8B",
-    # Gemma 2 (deprecated)
-    #   "google/gemma-2-2b", "google/gemma-2-9b",
-    # Gemma
-    "google/gemma-3-1b-pt",
-    "google/gemma-3-4b-pt",
-    "google/gemma-3-12b-pt",
+    # Phi
+    "microsoft/phi-4",
     # Qwen
     "Qwen/Qwen2.5-0.5B",
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-3B",
     "Qwen/Qwen2.5-7B",
-    # Phi
-    "microsoft/phi-4",
+    # Gemma
+    "google/gemma-3-1b-pt",
+    "google/gemma-3-4b-pt",
+    "google/gemma-3-12b-pt",
 ]
 
 FIELD_MODELS = dataclasses.field(default_factory=lambda: MODELS.copy())

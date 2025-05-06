@@ -32,6 +32,7 @@ class Scaled:
     scale_format: Q.TensorFormat
     block_shape: Q.BlockShape
     scaling: Q.Scaling
+    scaling_match: Literal["moments", "search"] = "search"
     sparse_format: Q.TensorFormat | None = None
     sparse_ratio: float = 0
     compressor: Q.Compressor | None = None
@@ -93,6 +94,7 @@ class Scaled:
                 scale_format=self.scale_format,
                 block_shape=self.block_shape,
                 scaling=self.scaling,
+                scaling_match=self.scaling_match,
                 compressor=self.compressor,
                 args=self.args,
             ),
@@ -150,6 +152,7 @@ def _scaled_element_format(
     scale_format: Q.TensorFormat,
     block_shape: Q.BlockShape,
     scaling: Q.Scaling,
+    scaling_match: Literal["moments", "search"],
     compressor: Q.Compressor,
     args: dict[str, Any],
 ) -> Q.TensorFormat:
@@ -218,16 +221,20 @@ def _scaled_element_format(
             # scale if the data were Uniform(-1, 1)
             base_scale = 3**0.5 / format.range[1]
 
-        # A brute-force search, because the space can be multimodal & this needs to
-        # be robust (could also use scipy.optimize.basinhopping, but it's less
-        # predictable)
-        scaled_and_rmse = [
-            _eval(log_s)
-            for log_s in torch.linspace(
-                log2(base_scale / 4), log2(base_scale * 4), steps
-            ).tolist()
-        ]
-        return min(scaled_and_rmse, key=lambda x: x[1])
+        if scaling_match == "moments":
+            return _eval(log2(base_scale))
+        if scaling_match == "search":
+            # A brute-force search, because the space can be multimodal & this needs to
+            # be robust (could also use scipy.optimize.basinhopping, but it's less
+            # predictable)
+            scaled_and_rmse = [
+                _eval(log_s)
+                for log_s in torch.linspace(
+                    log2(base_scale / 4), log2(base_scale * 4), steps
+                ).tolist()
+            ]
+            return min(scaled_and_rmse, key=lambda x: x[1])
+        assert False, f"unexpected scaling_match={scaling_match!r}"
 
     if element_family == "int":
         return find_scaled_format(Q.IntFormat(element_bits, **args))[0]
