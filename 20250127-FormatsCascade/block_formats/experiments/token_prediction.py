@@ -60,14 +60,20 @@ class Dataset:
         sequence_limit: int | None = None,
         line_limit: int | None = None,
         seed: int = 120081,
-        split: str = "test",
+        split: str | tuple[str, ...] = ("validation", "test"),
         progress: bool = False,
     ) -> "Dataset":
         """Load and tokenize the dataset, then use the model to provide reference logits."""
+        if isinstance(split, str):
+            split = (split,)
 
         dataset_name = ("Salesforce/wikitext", "wikitext-103-raw-v1")
         (device,) = set(p.device for p in model.parameters())
-        data = datasets.load_dataset(*dataset_name, split=split)["text"]
+        data = [
+            line
+            for s in split
+            for line in datasets.load_dataset(*dataset_name, split=s)["text"]
+        ]
         if line_limit:
             data = data[:line_limit]
         tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -131,7 +137,7 @@ class Dataset:
                     topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
 
         return cls(
-            name=":".join(dataset_name + (split,)),
+            name=":".join(dataset_name + ("-".join(split),)),
             tokens=tokens,
             masks=masks,
             bos_token_id=tokenizer.bos_token_id,
