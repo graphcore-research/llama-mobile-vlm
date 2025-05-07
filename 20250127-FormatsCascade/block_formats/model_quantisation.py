@@ -92,7 +92,6 @@ def quantise_2d_fixed(
     Returns a dictionary describing the quantisation result.
     """
     for name, param in _named_parameters_to_quantise(model, ignore):
-        # print(name)
         _quantise_named_parameter(
             name, param, fmt_spec, error_weight[name] if error_weight else None
         )

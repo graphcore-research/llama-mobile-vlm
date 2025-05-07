@@ -1068,7 +1068,7 @@ class CompressedLUTFormat(CompressedTensorFormat):
             )
             # We don't count the bits to encode the table, since it's considered
             # fixed (derived from `model_logp` not `tensor`).
-            return len(codec.encode(idx.cpu().numpy())) * 8
+            return len(codec.encode(idx.cpu().numpy().flatten())) * 8
 
         if self.compressor == "arithmetic":
             import arithmetic_compressor
