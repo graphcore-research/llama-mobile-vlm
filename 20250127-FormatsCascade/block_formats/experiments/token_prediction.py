@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Graphcore Ltd. All rights reserved.
 
 import dataclasses
-import multiprocessing
+from torch import multiprocessing
 import os
 import sys
 import traceback
@@ -433,6 +433,7 @@ def _sweep_init(queue: multiprocessing.Queue) -> None:
     device = queue.get_nowait()
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    torch.set_num_threads(16)
     global _SWEEP_RUNNER
     _SWEEP_RUNNER = _Runner()
 
