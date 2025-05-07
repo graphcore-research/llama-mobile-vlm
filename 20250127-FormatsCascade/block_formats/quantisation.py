@@ -894,7 +894,7 @@ def block_normalise(
     scaling: Scaling,
     element_range: tuple[float, float],
     scale_format: TensorFormat,
-) -> tuple[Tensor, Tuple]:
+) -> tuple[Tensor, Tensor]:
     """Normalise the tensor, returning the normalised tensor & scale."""
 
     if tensor.ndim != len(block_shape):
