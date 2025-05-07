@@ -244,6 +244,11 @@ def _scaled_element_format(
         assert (
             "mantissa_bits" not in args
         ), 'cannot specify args["mantissa_bits"] to F.Scaled(element_type="fp")'
+        assert (
+            round(element_bits) == element_bits
+        ), 'fractional `element_bits` are unsupported for F.Scaled(element_type="fp")'
+        element_bits = int(element_bits)
+
         candidate_exponent_bits = (
             [args.pop("exponent_bits")]
             if "exponent_bits" in args
