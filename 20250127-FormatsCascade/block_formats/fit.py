@@ -32,7 +32,7 @@ class Scaled:
     scale_format: Q.TensorFormat
     block_shape: Q.BlockShape
     scaling: Q.Scaling
-    scaling_match: Literal["moments", "search"] = "search"
+    scaling_match: Literal["search", "moments"] = "search"
     sparse_format: Q.TensorFormat | None = None
     sparse_ratio: float = 0
     compressor: Q.Compressor | None = None
@@ -75,9 +75,7 @@ class Scaled:
             return True
         if self.element_family == "t" and "df" not in self.args:
             return True
-        if self.scaling == "rms":
-            return True
-        return False
+        return self.scaling_match == "search"
 
     def fit(self, tensor: Tensor, error_weight: Tensor | None = None) -> Q.TensorFormat:
         if error_weight is not None and not self.supports_error_weight:
@@ -152,7 +150,7 @@ def _scaled_element_format(
     scale_format: Q.TensorFormat,
     block_shape: Q.BlockShape,
     scaling: Q.Scaling,
-    scaling_match: Literal["moments", "search"],
+    scaling_match: Literal["search", "moments"],
     compressor: Q.Compressor,
     args: dict[str, Any],
 ) -> Q.TensorFormat:
