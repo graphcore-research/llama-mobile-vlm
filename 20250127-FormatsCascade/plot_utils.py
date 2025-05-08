@@ -117,21 +117,16 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
         )
 
 
-def build_legend_handles(*groups_and_titles: list[dict[str, Any]] | str) -> list[Any]:
+def build_legend_handles(*rows: tuple[Any, ...] | dict[str, Any] | str) -> list[Any]:
     handles = []
-    sep = False
-    for group_or_title in groups_and_titles:
-        if sep:
-            handles.append(matplotlib.patches.Patch(color="none"))
-            sep = False
-        if isinstance(group_or_title, str):
-            handles.append(matplotlib.patches.Patch(color="none", label=group_or_title))
+    for row in rows:
+        if isinstance(row, str):
+            handles.append(matplotlib.patches.Patch(color="none", label=row))
         else:
-            for *_, args in group_or_title:
-                args = dict(args)
-                args.setdefault("color", "k")
-                handles.append(matplotlib.lines.Line2D([], [], **args))
-            sep = True
+
+            args = dict(row if isinstance(row, dict) else row[-1])
+            args.setdefault("color", "k")
+            handles.append(matplotlib.lines.Line2D([], [], **args))
     return handles
 
 
@@ -139,7 +134,7 @@ def set_figure_legend(
     figure: matplotlib.figure.Figure,
     handles: Any = None,
     labels: Any = None,
-    build: list[list[dict[str, Any]] | str] = None,
+    build: list[tuple[Any, ...] | dict[str, Any] | str] = None,
     loc: str = "center left",
     bbox_to_anchor: tuple[float, float] = (0.98, 0.5),
     **args: Any,
