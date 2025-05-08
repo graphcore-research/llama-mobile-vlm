@@ -29,6 +29,10 @@ DISPLAY_NAMES = {
     "BFLOAT16": r"\texttt{bfloat16}",
     "EXP8": r"\texttt{E8M0}",
     "E0M3": r"INT4",
+    # Experiments
+    "bits_per_param": r"$b$",
+    "kl_div": r"$\mathrm{D}$",
+    "allocation": "Bit allocation",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
 
