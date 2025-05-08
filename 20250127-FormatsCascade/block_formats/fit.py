@@ -35,14 +35,21 @@ class Scaled:
     scaling_match: Literal["search", "moments"] = "search"
     sparse_format: Q.TensorFormat | None = None
     sparse_ratio: float = 0
-    compressor: Q.Compressor | None = None
+    # If a tuple: (compressor, training_compressor)
+    compressor: Q.Compressor | tuple[Q.Compressor, Q.Compressor] | None = None
     args: dict[str, Any] = dataclasses.field(default_factory=lambda: {})
 
     _type: str = "fit_scaled"
 
     def __str__(self) -> str:
         block = ",".join("*" if g is None else str(g) for g in self.block_shape)
-        compress = f"+Z{self.compressor}" if self.compressor else ""
+        compress = ""
+        if self.compressor:
+            if isinstance(self.compressor, tuple):
+                out_compressor, train_compressor = self.compressor
+                compress = f"+Z{out_compressor}|Z{train_compressor}"
+            else:
+                compress = f"+Z{self.compressor}"
         sparse = ""
         if self.sparse_ratio:
             sparse_ratio = format(
@@ -56,7 +63,7 @@ class Scaled:
         )
         return (
             f"{self.element_bits:.3g}b-{self.element_family}{args}{compress}"
-            f"{{{block}:{self.scale_format}:{self.scaling}}}{sparse}"
+            f"{{{block}:{self.scale_format}:{self.scaling}:{self.scaling_match}}}{sparse}"
         )
 
     @property
@@ -108,11 +115,16 @@ class Scaled:
 def _find_compressed_grid_quantiser(
     tensor: Tensor,
     amax: Tensor,
-    compressor: Q.Compressor,
+    compressor: Q.Compressor | tuple[Q.Compressor, Q.Compressor],
     args: dict[str, Any],
     target_bits: float,
     max_n: int = 2**24,
 ) -> Q.CompressedLUTFormat:
+    if isinstance(compressor, tuple):
+        out_compressor, train_compressor = compressor
+    else:
+        out_compressor = train_compressor = compressor
+
     def fmt(half_n: float) -> Q.CompressedLUTFormat:
         # Use an odd number of grid datapoints to represent zero (can be critical)
         # Don't use train_grid, since it rounds up the element range > absmax,
@@ -121,7 +133,7 @@ def _find_compressed_grid_quantiser(
         return Q.CompressedLUTFormat.train(
             Q.LUTFormat.create(torch.linspace(-amax, amax, n), f"GRID{{n={n:.0f}}}"),
             tensor,
-            compressor=compressor,
+            compressor=train_compressor,
             **args,
         )
 
@@ -139,7 +151,7 @@ def _find_compressed_grid_quantiser(
         half_n_max,
         xtol=1,
     )
-    return fmt(half_n)
+    return dataclasses.replace(fmt(half_n), compressor=out_compressor)
 
 
 def _scaled_element_format(
@@ -151,7 +163,7 @@ def _scaled_element_format(
     block_shape: Q.BlockShape,
     scaling: Q.Scaling,
     scaling_match: Literal["search", "moments"],
-    compressor: Q.Compressor,
+    compressor: Q.Compressor | tuple[Q.Compressor, Q.Compressor] | None,
     args: dict[str, Any],
 ) -> Q.TensorFormat:
     """Fit a scaled element format to the given tensor."""

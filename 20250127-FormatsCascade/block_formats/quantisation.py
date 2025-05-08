@@ -1060,15 +1060,26 @@ class CompressedLUTFormat(CompressedTensorFormat):
             return len(bz2.compress(idx_bytes)) * 8
 
         if self.compressor == "huffman":
+            # We don't count the bits to encode the table, since it's considered
+            # fixed (derived from `model_logp` not `tensor`).
             import dahuffman
 
             # Note: use freq = p * large-const, since EOF is added with freq=1
             codec = dahuffman.HuffmanCodec.from_frequencies(
                 {i: p.exp().item() * 2**20 for i, p in enumerate(self.model_logp)}
             )
-            # We don't count the bits to encode the table, since it's considered
-            # fixed (derived from `model_logp` not `tensor`).
-            return len(codec.encode(idx.cpu().numpy().flatten())) * 8
+            # Instead of actually encoding the data, which is very slow, encode test
+            # sequences to work out the number of bits per item and index into that.
+            # This works because huffman compression is stateless between symbols.
+            n_samples = 1024
+            nbits = torch.tensor(
+                [
+                    8 * len(codec.encode([i] * n_samples)) / n_samples
+                    for i in range(len(self.model_logp))
+                ],
+                device=idx.device,
+            )
+            return nbits[idx].sum().item()
 
         if self.compressor == "arithmetic":
             import arithmetic_compressor
