@@ -9,7 +9,7 @@ import block_formats.fit as F
 import block_formats.quantisation as Q
 
 
-def _tests_main(step: float) -> Iterable[ET.Test]:
+def _main(step: float) -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, step).tolist():
         for element_family, compressor, args in [
             ("int", "optimal", {}),
@@ -42,7 +42,21 @@ def _tests_main(step: float) -> Iterable[ET.Test]:
                             )
 
 
-def _tests_fisher(step: float) -> Iterable[ET.Test]:
+def _huffman(step: float) -> Iterable[ET.Test]:
+    for element_bits in torch.arange(3, 5.01, step).tolist():
+        yield ET.QuantiseFixed(
+            F.Scaled(
+                element_bits=element_bits,
+                element_family="int",
+                scale_format=Q.BFLOAT16,
+                block_shape=(None, None),
+                scaling="rms",
+                compressor=("huffman", "optimal"),
+            )
+        )
+
+
+def _fisher(step: float) -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, step).tolist():
         for element_family, compressor, scaling, block_shape, sparse_ratio in [
             ("int", "optimal", "rms", (None, None), 0),
@@ -78,7 +92,7 @@ def _tests_fisher(step: float) -> Iterable[ET.Test]:
                             yield cls(fmt, error_weight=error_weight)
 
 
-def _tests_block_size() -> Iterable[ET.Test]:
+def _block_size() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
         for block_size in [16, 32, 64, 128, 256]:
             fmt = F.Scaled(
@@ -91,7 +105,7 @@ def _tests_block_size() -> Iterable[ET.Test]:
             yield ET.QuantiseFixed(fmt)
 
 
-def _tests_scale_mantissa() -> Iterable[ET.Test]:
+def _scale_mantissa() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
         for mbits in range(0, 8):
             fmt = F.Scaled(
@@ -104,7 +118,7 @@ def _tests_scale_mantissa() -> Iterable[ET.Test]:
             yield ET.QuantiseFixed(fmt)
 
 
-def _tests_symmetry() -> Iterable[ET.Test]:
+def _symmetry() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
         for element_family in ["int", "t"]:
             for mode, scaling in [
@@ -123,7 +137,7 @@ def _tests_symmetry() -> Iterable[ET.Test]:
                 yield ET.QuantiseFixed(fmt)
 
 
-def _tests_element_formats() -> Iterable[ET.Test]:
+def _element_formats() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
         for scaling, block_shape, sparse_ratio in [
             ("absmax", (1, 128), 0),
@@ -143,7 +157,9 @@ def _tests_element_formats() -> Iterable[ET.Test]:
                     if element_family in ["int", "normal", "laplace", "t"]
                     else [{}]
                 ):
-                    for scaling_match in ["search"] + (["moments"] if element_family != "lloyd_max" else []):
+                    for scaling_match in ["search"] + (
+                        ["moments"] if element_family != "lloyd_max" else []
+                    ):
                         fmt = F.Scaled(
                             element_bits=element_bits,
                             element_family=element_family,
@@ -155,36 +171,42 @@ def _tests_element_formats() -> Iterable[ET.Test]:
                             sparse_ratio=sparse_ratio,
                             args=dict(**args, **mode_args),
                         )
-                        for error_weight in [None] + (["fisher"] if fmt.supports_error_weight else []):
+                        for error_weight in [None] + (
+                            ["fisher"] if fmt.supports_error_weight else []
+                        ):
                             yield ET.QuantiseFixed(fmt, error_weight=error_weight)
 
 
 if __name__ == "__main__":
-    MODELS_ALL = E.MODELS
-    MODELS_LLAMA8B = ["meta-llama/Llama-3.1-8B"]
-    MODELS_NOT_GEMMA = [m for m in MODELS_ALL if "gemma" not in m]
-    MODELS_NOT_GEMMA_OR_LLAMA8B = [m for m in MODELS_NOT_GEMMA if m not in MODELS_LLAMA8B]
+    MOD_ALL = E.MODELS
+    MOD_LLAMA8B = ["meta-llama/Llama-3.1-8B"]
+    MOD_NOT_LLAMA8B = [m for m in MOD_ALL if m not in MOD_LLAMA8B]
 
-    sweeps = []
-    sweeps.append(dict(name="baseline", tests=[ET.Baseline()], models=MODELS_ALL))
+    s = []
+    s.append(dict(name="baseline", tests=[ET.Baseline()], models=MOD_ALL))
 
-    sweeps.append(dict(name="main", tests=list(_tests_main(0.25)), models=MODELS_LLAMA8B))
-    sweeps.append(dict(name="main", tests=list(_tests_main(1)), models=MODELS_NOT_GEMMA_OR_LLAMA8B))
+    s.append(dict(name="main", tests=list(_main(0.25)), models=MOD_LLAMA8B))
+    s.append(dict(name="main", tests=list(_main(1)), models=MOD_NOT_LLAMA8B))
+    s.append(dict(name="huffman", tests=list(_huffman(0.25)), models=MOD_LLAMA8B))
+    s.append(dict(name="fisher", tests=list(_fisher(0.25)), models=MOD_LLAMA8B))
+    s.append(dict(name="fisher", tests=list(_fisher(1)), models=MOD_NOT_LLAMA8B))
 
-    sweeps.append(dict(name="fisher", tests=list(_tests_fisher(0.25)), models=MODELS_LLAMA8B))
-    sweeps.append(dict(name="fisher", tests=list(_tests_fisher(1)), models=MODELS_NOT_GEMMA_OR_LLAMA8B))
+    s.append(dict(name="blocksize", tests=list(_block_size()), models=MOD_ALL))
+    s.append(dict(name="scalemantissa", tests=list(_scale_mantissa()), models=MOD_ALL))
+    s.append(dict(name="symmetry", tests=list(_symmetry()), models=MOD_ALL))
+    s.append(
+        dict(name="elementformats", tests=list(_element_formats()), models=MOD_ALL)
+    )
 
-    sweeps.append(dict(name="blocksize", tests=list(_tests_block_size()), models=MODELS_NOT_GEMMA))
-    sweeps.append(dict(name="scalemantissa", tests=list(_tests_scale_mantissa()), models=MODELS_NOT_GEMMA))
-    sweeps.append(dict(name="symmetry", tests=list(_tests_symmetry()), models=MODELS_NOT_GEMMA))
-    sweeps.append(dict(name="elementformats", tests=list(_tests_element_formats()), models=MODELS_NOT_GEMMA))
-
-    for sweep in sweeps:
-        print(f"### {sweep['name']} ({len(sweep['models'])} x {len(sweep['tests'])})", file=sys.stderr)
+    for sweep in s:
+        print(
+            f"### {sweep['name']} ({len(sweep['models'])} x {len(sweep['tests'])})",
+            file=sys.stderr,
+        )
         ET.run_sweep(
             [
                 ET.Run(f"20250506-results-{sweep['name']}", test, model)
-                for model in sweep['models']
-                for test in sweep['tests']
+                for model in sweep["models"]
+                for test in sweep["tests"]
             ]
         )
