@@ -56,11 +56,15 @@ def _named_parameters_to_quantise(
     return params
 
 
-def _quantisation_log(model: nn.Module, verbose: bool) -> dict[str, Any]:
+def _quantisation_log(
+    model: nn.Module, verbose: bool, ignore: tuple[str]
+) -> dict[str, Any]:
     log = {}
     total_bits, total_nelement = 0, 0
     for name, param in model.named_parameters():
-        if hasattr(param, "_quantised"):
+        if any(p in ignore for p in name.split(".")):
+            pass
+        elif hasattr(param, "_quantised"):
             log[name] = param._quantised.copy()
             if not verbose:
                 log[name].pop("fmt")
@@ -95,7 +99,7 @@ def quantise_2d_fixed(
         _quantise_named_parameter(
             name, param, fmt_spec, error_weight[name] if error_weight else None
         )
-    return _quantisation_log(model, verbose=verbose_log)
+    return _quantisation_log(model, verbose=verbose_log, ignore=ignore)
 
 
 def quantise_2d_variable(
@@ -144,7 +148,7 @@ def quantise_2d_variable(
             dataclasses.replace(fmt_spec, element_bits=bit_width),
             error_weight[name] if error_weight else None,
         )
-    return _quantisation_log(model, verbose=verbose_log)
+    return _quantisation_log(model, verbose=verbose_log, ignore=ignore)
 
 
 def quantise_2d_heuristic(
@@ -184,4 +188,4 @@ def quantise_2d_heuristic(
         _quantise_named_parameter(
             name, param, fmt_spec_i, error_weight[name] if error_weight else None
         )
-    return _quantisation_log(model, verbose=verbose_log)
+    return _quantisation_log(model, verbose=verbose_log, ignore=ignore)
