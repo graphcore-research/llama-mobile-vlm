@@ -32,6 +32,7 @@ DISPLAY_NAMES = {
     # Experiments
     "bits_per_param": r"$b$",
     "kl_div": r"$\mathrm{D}$",
+    "kl_div_efficiency": r"$\mathrm{D}\cdot 2^{2b}$",
     "allocation": "Bit allocation",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
