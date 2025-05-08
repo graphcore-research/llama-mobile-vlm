@@ -433,7 +433,7 @@ def _sweep_init(queue: multiprocessing.Queue) -> None:
     device = queue.get_nowait()
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
-    torch.set_num_threads(16)
+    torch.set_num_threads(16)  # avoid CPU contention when sweeping
     global _SWEEP_RUNNER
     _SWEEP_RUNNER = _Runner()
 
