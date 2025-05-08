@@ -1,15 +1,17 @@
 """Generate paper-ready plots"""
 
+import fractions
 import inspect
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
-import fractions
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import seaborn as sns
 
 PALETTE = sns.color_palette("Dark2")
@@ -218,12 +220,30 @@ def grid(
     return Grid(rows=rows, cols=cols, axes=axes, figure=figure)
 
 
+def fmt_latex_booktabs(df: pd.DataFrame, cols: dict[str, str]) -> str:
+    """Format as a booktabs table."""
+
+    def fmt_value(v: Any) -> str:
+        if isinstance(v, float):
+            return f"{v:.3g}"
+        else:
+            return str(v)
+
+    s = r"\begin{tabular}" + "{" + "l" * len(cols) + "}" + r" \toprule"
+    s += "\n  " + " & ".join(cols.values()) + r" \\\midrule"
+    for _, row in df.iterrows():
+        s += "\n  " + " & ".join(fmt_value(row[col]) for col in cols) + r" \\"
+    s += "\n" + r"\bottomrule"
+    s += "\n" + r"\end{tabular}"
+    return s
+
+
 # Paper sync
 
 
 def push_to_paper() -> None:
     for git_cmd in [
-        "add code/ fig/",
+        "add code/ fig/ tab/",
         "commit -m 'Update figures' --quiet",
         "pull --rebase --quiet",
         "push --quiet",
@@ -259,5 +279,18 @@ def save_code(fn: Callable[..., Any], push: bool = True) -> None:
             f"Couldn't find {root} - please clone the paper into overleaf/"
         )
     (root / f"{fn.__name__}.py").write_text(code)
+    if push:
+        push_to_paper()
+
+
+def save_table(
+    name: str, df: pd.DataFrame, cols: dict[str, str], push: bool = True
+) -> str:
+    root = Path("overleaf/tab")
+    if not root.exists():
+        raise ValueError(
+            f"Couldn't find {root} - please clone the paper into overleaf/"
+        )
+    (root / f"{name}.tex").write_text(fmt_latex_booktabs(df, cols=cols))
     if push:
         push_to_paper()
