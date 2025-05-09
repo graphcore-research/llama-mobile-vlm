@@ -25,7 +25,7 @@ def fetch_fisher(
     model_name: str, device: torch.device, experiment_name: str = EXPERIMENT_DEFAULT
 ) -> dict[str, Tensor]:
     file_name = f"{model_name.replace('/', '--')}.safetensors"
-    path = Path("out") / experiment_name / file_name
+    path = Path(__file__).parent.parent.parent / "out" / experiment_name / file_name
     if not path.is_file():
         raise ValueError(
             f"Fisher checkpoint for {model_name} expected at {path}."

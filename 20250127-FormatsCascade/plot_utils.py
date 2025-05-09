@@ -33,6 +33,7 @@ DISPLAY_NAMES = {
     "bits_per_param": r"$b$",
     "kl_div": r"$\mathrm{D}$",
     "kl_div_efficiency": r"$\mathrm{D}\cdot 2^{2b}$",
+    "kl_div_efficiency_delta": r"Ratio of $\mathrm{mean}(\mathrm{D}\cdot 2^{2b})$",
     "allocation": "Bit allocation",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
@@ -240,6 +241,8 @@ def fmt_latex_booktabs(df: pd.DataFrame, cols: dict[str, str]) -> str:
 
 # Paper sync
 
+OVERLEAF = Path(__file__).parent / "overleaf"
+
 
 def push_to_paper() -> None:
     for git_cmd in [
@@ -248,7 +251,7 @@ def push_to_paper() -> None:
         "pull --rebase --quiet",
         "push --quiet",
     ]:
-        cmd = f"git -C overleaf {git_cmd}"
+        cmd = f"git -C {OVERLEAF} {git_cmd}"
         # print(f"$ {cmd}", file=sys.stderr)
         if subprocess.call(cmd, shell=True):
             print(f"Error running {cmd!r} -- aborting")
@@ -257,7 +260,7 @@ def push_to_paper() -> None:
 
 def save(name: str, push: bool = True) -> None:
     """Save and push a figure to the paper."""
-    root = Path("overleaf/fig")
+    root = OVERLEAF / "fig"
     if not root.exists():
         raise ValueError(
             f"Couldn't find {root} - please clone the paper into overleaf/"
@@ -273,7 +276,7 @@ def save_code(fn: Callable[..., Any], push: bool = True) -> None:
     body = [x for x in body if "# IGNORE" not in x]
     code = "\n".join(body) + "\n"
 
-    root = Path("overleaf/code")
+    root = OVERLEAF / "code"
     if not root.exists():
         raise ValueError(
             f"Couldn't find {root} - please clone the paper into overleaf/"
@@ -286,7 +289,7 @@ def save_code(fn: Callable[..., Any], push: bool = True) -> None:
 def save_table(
     name: str, df: pd.DataFrame, cols: dict[str, str], push: bool = True
 ) -> str:
-    root = Path("overleaf/tab")
+    root = OVERLEAF / "tab"
     if not root.exists():
         raise ValueError(
             f"Couldn't find {root} - please clone the paper into overleaf/"
