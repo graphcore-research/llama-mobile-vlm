@@ -118,8 +118,8 @@ def _scale_mantissa() -> Iterable[ET.Test]:
             yield ET.QuantiseFixed(fmt)
 
 
-def _symmetry() -> Iterable[ET.Test]:
-    for element_bits in torch.arange(3, 5.01, 1).tolist():
+def _symmetry(step: float) -> Iterable[ET.Test]:
+    for element_bits in torch.arange(3, 5.01, step).tolist():
         for element_family in ["int", "t"]:
             for mode, scaling in [
                 ("asymmetric", "absmax"),
@@ -188,12 +188,15 @@ if __name__ == "__main__":
     s.append(dict(name="main", tests=list(_main(0.25)), models=MOD_LLAMA8B))
     s.append(dict(name="main", tests=list(_main(1)), models=MOD_NOT_LLAMA8B))
     s.append(dict(name="huffman", tests=list(_huffman(0.25)), models=MOD_LLAMA8B))
+
     s.append(dict(name="fisher", tests=list(_fisher(0.25)), models=MOD_LLAMA8B))
     s.append(dict(name="fisher", tests=list(_fisher(1)), models=MOD_NOT_LLAMA8B))
 
+    s.append(dict(name="symmetry-v2", tests=list(_symmetry(0.25)), models=MOD_LLAMA8B))
+    s.append(dict(name="symmetry-v2", tests=list(_symmetry(1)), models=MOD_NOT_LLAMA8B))
+
     s.append(dict(name="blocksize", tests=list(_block_size()), models=MOD_ALL))
     s.append(dict(name="scalemantissa", tests=list(_scale_mantissa()), models=MOD_ALL))
-    s.append(dict(name="symmetry", tests=list(_symmetry()), models=MOD_ALL))
     s.append(
         dict(name="elementformats", tests=list(_element_formats()), models=MOD_ALL)
     )
