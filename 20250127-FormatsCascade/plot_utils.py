@@ -38,6 +38,12 @@ DISPLAY_NAMES = {
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
 
+# fmt: off
+MODEL_ORDER_GRID = ["Llama-3.1-8B", "gemma-3-12b-pt", "phi-4",
+                    "Llama-3.2-3B", "gemma-3-4b-pt", "Qwen2.5-7B",
+                    "Llama-3.2-1B", "gemma-3-1b-pt", "Qwen2.5-3B"]
+# fmt:on
+
 
 def format_fraction(max_denominator: int = 10) -> Callable[[float, int], str]:
     def _format(x: float, n: int) -> str:
