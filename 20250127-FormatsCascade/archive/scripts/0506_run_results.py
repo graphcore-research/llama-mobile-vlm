@@ -105,6 +105,30 @@ def _block_size() -> Iterable[ET.Test]:
             yield ET.QuantiseFixed(fmt)
 
 
+def _alternatives() -> Iterable[ET.Test]:
+    for block_size in [16, 32, 64, 128, 256]:
+        for element_family in ["normal", "laplace", "t"]:
+            fmt = F.Scaled(
+                element_bits=4,
+                element_family="t",
+                scale_format=Q.BFLOAT16,
+                block_shape=(1, block_size),
+                scaling="absmax",
+                scaling_match="moments",
+                args=dict(mode="asymmetric"),
+            )
+            yield ET.QuantiseFixed(fmt)
+        for element_format in [Q.NF4, Q.SF4_DF5, Q.parse("E2M1"), Q.IntFormat(4)]:
+            yield ET.QuantiseFixed(
+                Q.LinearScalingFormat(
+                    element_format=element_format,
+                    scale_format=Q.BFLOAT16,
+                    block_shape=(1, block_size),
+                    scaling="absmax",
+                )
+            )
+
+
 def _scale_mantissa() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
         for mbits in range(0, 8):
@@ -196,6 +220,7 @@ if __name__ == "__main__":
     s.append(dict(name="symmetry-v2", tests=list(_symmetry(1)), models=MOD_NOT_LLAMA8B))
 
     s.append(dict(name="blocksize", tests=list(_block_size()), models=MOD_ALL))
+    s.append(dict(name="alternatives", tests=list(_alternatives()), models=MOD_ALL))
     s.append(dict(name="scalemantissa", tests=list(_scale_mantissa()), models=MOD_ALL))
     s.append(
         dict(name="elementformats", tests=list(_element_formats()), models=MOD_ALL)
