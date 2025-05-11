@@ -107,17 +107,6 @@ def _block_size() -> Iterable[ET.Test]:
 
 def _alternatives() -> Iterable[ET.Test]:
     for block_size in [16, 32, 64, 128, 256]:
-        for element_family in ["normal", "laplace", "t"]:
-            fmt = F.Scaled(
-                element_bits=4,
-                element_family="t",
-                scale_format=Q.BFLOAT16,
-                block_shape=(1, block_size),
-                scaling="absmax",
-                scaling_match="moments",
-                args=dict(mode="asymmetric"),
-            )
-            yield ET.QuantiseFixed(fmt)
         for element_format in [Q.NF4, Q.SF4_DF5, Q.parse("E2M1"), Q.IntFormat(4)]:
             yield ET.QuantiseFixed(
                 Q.LinearScalingFormat(
@@ -127,6 +116,17 @@ def _alternatives() -> Iterable[ET.Test]:
                     scaling="absmax",
                 )
             )
+        for element_family in ["normal", "laplace", "t"]:
+            fmt = F.Scaled(
+                element_bits=4,
+                element_family=element_family,
+                scale_format=Q.BFLOAT16,
+                block_shape=(1, block_size),
+                scaling="absmax",
+                scaling_match="moments",
+                args=dict(mode="asymmetric"),
+            )
+            yield ET.QuantiseFixed(fmt)
 
 
 def _scale_mantissa() -> Iterable[ET.Test]:
