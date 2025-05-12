@@ -147,14 +147,14 @@ class Sweep:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
                     config["model"], torch_dtype=torch.bfloat16, device_map=self.device
                 )
-                data = token_prediction.Dataset.load_wikitext(
+                data = token_prediction.Dataset.load(
                     model,
                     sequence_length=self.sequence_length,
                     sequence_limit=self.sequence_limit,
                     line_limit=self.line_limit,
                     batch_size=self.batch_size,
                     kl_topk=0,
-                    split="train",
+                    dataset=("wikitext", ("train",)),
                     progress=True,
                 )
                 with activation_checkpointing_enabled(model):

@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Graphcore Ltd. All rights reserved.
 
 import dataclasses
-from torch import multiprocessing
+import itertools as it
 import os
 import sys
 import traceback
@@ -12,7 +12,7 @@ import datasets
 import torch
 import tqdm
 import transformers
-from torch import Tensor, nn
+from torch import Tensor, multiprocessing, nn
 
 from .. import model_quantisation as M
 from . import core, fisher
@@ -50,8 +50,44 @@ class Dataset:
     def kl_topk(self) -> int:
         return self.topk_indices.shape[-1]
 
+    @staticmethod
+    def _load_wikitext(
+        split: tuple[str, ...], line_limit: int | None
+    ) -> tuple[str, list[str]]:
+        """Returns (name, lines)"""
+        dataset_name = ("Salesforce/wikitext", "wikitext-103-raw-v1")
+        data = [
+            line
+            for s in split
+            for line in datasets.load_dataset(*dataset_name, split=s)["text"]
+        ]
+        if line_limit:
+            data = data[:line_limit]
+        return ":".join(dataset_name), data
+
+    @staticmethod
+    def _load_github_code(
+        split: tuple[str, ...], line_limit: int | None
+    ) -> tuple[str, list[str]]:
+        """Returns (name, lines)"""
+        assert line_limit is not None, "github-code is too big - specify a line_limit"
+        assert split == ("train",)
+        dataset_name = "codeparrot/github-code"
+        data = [
+            line["code"]
+            for line in it.islice(
+                datasets.load_dataset(
+                    dataset_name, split="train", streaming=True, trust_remote_code=True
+                ),
+                line_limit,
+            )
+        ]
+        return dataset_name, data
+
+    WIKITEXT_DEFAULT = ("wikitext", ("validation", "test"))
+
     @classmethod
-    def load_wikitext(
+    def load(
         cls,
         model: transformers.PreTrainedModel,
         sequence_length: int,
@@ -60,22 +96,25 @@ class Dataset:
         sequence_limit: int | None = None,
         line_limit: int | None = None,
         seed: int = 120081,
-        split: str | tuple[str, ...] = ("validation", "test"),
+        dataset: tuple[
+            Literal["wikitext", "github-code"], tuple[str, ...]
+        ] = WIKITEXT_DEFAULT,
         progress: bool = False,
     ) -> "Dataset":
-        """Load and tokenize the dataset, then use the model to provide reference logits."""
-        if isinstance(split, str):
-            split = (split,)
+        """Load and tokenize the dataset, then use the model to provide reference logits.
 
-        dataset_name = ("Salesforce/wikitext", "wikitext-103-raw-v1")
+        dataset: ("wikitext", ("validation", "test"))
+                 ("github-code", ("train",))
+        """
         (device,) = set(p.device for p in model.parameters())
-        data = [
-            line
-            for s in split
-            for line in datasets.load_dataset(*dataset_name, split=s)["text"]
-        ]
-        if line_limit:
-            data = data[:line_limit]
+
+        if dataset[0] == "wikitext":
+            dataset_name, data = cls._load_wikitext(dataset[1], line_limit)
+        elif dataset[0] == "github-code":
+            dataset_name, data = cls._load_github_code(dataset[1], line_limit)
+        else:
+            raise ValueError(f"Dataset {dataset[0]!r} not found")
+
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model.config._name_or_path
         )
@@ -137,7 +176,7 @@ class Dataset:
                     topk_logp_[...], topk_indices_[...] = logp_.topk(kl_topk, dim=-1)
 
         return cls(
-            name=":".join(dataset_name + ("-".join(split),)),
+            name=":".join((dataset_name, "-".join(dataset[1]))),
             tokens=tokens,
             masks=masks,
             bos_token_id=tokenizer.bos_token_id,
@@ -371,6 +410,8 @@ class Run:
     kl_topk: int = 128
     batch_size: int = 1
     sequence_limit: int | None = None
+    line_limit: int | None = None
+    dataset: Literal["wikitext", "github-code"] = "wikitext"
     device: torch.device = core.FIELD_DEVICE
     type: str = "token_prediction"
 
@@ -395,14 +436,21 @@ class _Runner:
         ):
             self.model = self.data = None  # allow device memory to be freed
             self.model = core.RequantisableModel.load(
-                run.model, device=run.device, dtype=torch.bfloat16
+                run.model,
+                device=run.device,
+                dtype=torch.bfloat16,
             )
-            self.data = Dataset.load_wikitext(
+            self.data = Dataset.load(
                 self.model.model,
                 sequence_length=run.sequence_length,
                 batch_size=run.batch_size,
                 kl_topk=run.kl_topk,
                 sequence_limit=run.sequence_limit,
+                line_limit=run.line_limit,
+                dataset={
+                    "wikitext": Dataset.WIKITEXT_DEFAULT,
+                    "github-code": ("github-code", ("train",)),
+                }[run.dataset],
             )
             self.loaded_run = run
 

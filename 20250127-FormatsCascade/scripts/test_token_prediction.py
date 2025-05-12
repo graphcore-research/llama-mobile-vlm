@@ -27,5 +27,16 @@ if __name__ == "__main__":
         ),
     ]
     ET.run_sweep(
-        [ET.Run("dev", test, "meta-llama/Llama-3.2-1B", batch_size=1) for test in tests]
+        [
+            ET.Run(
+                "dev",
+                test,
+                "meta-llama/Llama-3.2-1B",
+                batch_size=1,
+                dataset="github-code",
+                sequence_limit=256,
+                line_limit=4096,
+            )
+            for test in tests
+        ]
     )

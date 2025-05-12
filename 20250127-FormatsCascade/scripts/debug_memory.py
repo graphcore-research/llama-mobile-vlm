@@ -11,7 +11,7 @@ if __name__ == "__main__":
             torch.device("cuda"),
             torch.bfloat16,
         )
-        data = E.token_prediction.Dataset.load_wikitext(model.model, 4096, 1, 0, 4)
+        data = E.token_prediction.Dataset.load(model.model, 4096, 1, 0, 4)
         with E.fisher.activation_checkpointing_enabled(model.model):
             result = E.fisher.diag_fisher(
                 data, model.model, mode="single_sample", progress=True
