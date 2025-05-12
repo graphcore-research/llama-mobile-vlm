@@ -31,9 +31,10 @@ DISPLAY_NAMES = {
     "E0M3": r"INT4",
     # Experiments
     "bits_per_param": r"$b$",
-    "kl_div": r"$\mathrm{D}$",
-    "kl_div_efficiency": r"$\mathrm{D}\cdot 2^{2b}$",
-    "kl_div_efficiency_delta": r"Ratio of $\mathrm{mean}(\mathrm{D}\cdot 2^{2b})$",
+    "kl_div": r"$\mathrm{D_{KL}}$",
+    "kl_div_efficiency": r"$\rho$",
+    # "kl_div_efficiency": r"$\mathrm{D_{KL}}\cdot 2^{2b}$",
+    # "kl_div_efficiency_delta": r"Ratio of $\mathrm{mean}(\mathrm{D}\cdot 2^{2b})$",
     "allocation": "Bit allocation",
 }
 CRD_LABEL = r"$\sqrt[3]{\mathrm{p}}$"
@@ -59,6 +60,21 @@ def format_fraction(max_denominator: int = 10) -> Callable[[float, int], str]:
 
 def drop_label(args: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in args.items() if k != "label"}
+
+
+def transform_labels(
+    items: list[tuple[Any, ...]], pattern: str, replacement: str
+) -> list[tuple[Any, ...]]:
+    return [
+        (
+            *p,
+            {
+                k: v.replace(pattern, replacement) if k == "label" else v
+                for k, v in d.items()
+            },
+        )
+        for *p, d in items
+    ]
 
 
 def display_name(t: str) -> str:
@@ -148,7 +164,7 @@ def set_figure_legend(
     labels: Any = None,
     build: list[tuple[Any, ...] | dict[str, Any] | str] = None,
     loc: str = "center left",
-    bbox_to_anchor: tuple[float, float] = (0.98, 0.5),
+    bbox_to_anchor: tuple[float, float] = (0.98, 0.55),
     **args: Any,
 ) -> None:
     if build is not None:
