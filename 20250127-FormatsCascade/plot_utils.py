@@ -24,11 +24,15 @@ DISPLAY_NAMES = {
     "LM": "Lloyd-Max",
     "rms": "RMS",
     "absmax": "Absmax",
+    "signmax": "Signmax",
     "df": r"$\nu$",
     # Formats
     "BFLOAT16": r"\texttt{bfloat16}",
     "EXP8": r"\texttt{E8M0}",
-    "E0M3": r"INT4",
+    "E0M3": r"\texttt{INT4}",
+    "E2M1": r"\texttt{E2M1}",
+    "E3M0": r"\texttt{E3M0}",
+    "NF4": r"\texttt{NF4}",
     # Experiments
     "bits_per_param": r"$b$",
     "kl_div": r"$\mathrm{D_{KL}}$",
@@ -114,8 +118,11 @@ def configure(disable_tex_for_debug_speed: bool = False) -> None:
                     r"\usepackage{amsmath}",
                     r"\usepackage{amsfonts}",
                     r"\usepackage{bm}",
+                    r"\newcommand{\prob}{\mathrm{p}}",
                     r"\newcommand{\norm}[2]{\left \lVert #1 \right \rVert_{#2}}",
-                    r"\newcommand{\expectation}{\mathop{{}\mathbb{E}}}",
+                    r"\newcommand{\expectation}[2]{\mathop{{}\mathbb{E}}_{#1}\left[#2\right]}",
+                    r"\newcommand{\kl}{\mathrm{D_{KL}}}",
+                    r"\newcommand{\kld}[2]{\kl\left(#1\|#2\right)}",
                 ]
             ),
             # General
