@@ -13,6 +13,8 @@ from torch import Tensor
 
 from . import quantisation as Q
 
+MAX_ROTATION_SIZE = 32768
+
 
 @dataclass
 class Scaled:
@@ -37,6 +39,7 @@ class Scaled:
     sparse_ratio: float = 0
     # If a tuple: (compressor, training_compressor)
     compressor: Q.Compressor | tuple[Q.Compressor, Q.Compressor] | None = None
+    rotation: int | None = None
     args: dict[str, Any] = dataclasses.field(default_factory=lambda: {})
 
     _type: str = "fit_scaled"
@@ -56,6 +59,9 @@ class Scaled:
                 self.sparse_ratio, ".1%" if 1e-3 <= self.sparse_ratio else ".0e"
             )
             sparse = f"+S[{sparse_ratio}:{self.sparse_format}]"
+        rotation = ""
+        if self.rotation is not None:
+            rotation = "+R"
         args = (
             "(" + ",".join(f"{k}={v}" for k, v in self.args.items()) + ")"
             if self.args
@@ -63,7 +69,7 @@ class Scaled:
         )
         return (
             f"{self.element_bits:.3g}b-{self.element_family}{args}{compress}"
-            f"{{{block}:{self.scale_format}:{self.scaling}:{self.scaling_match}}}{sparse}"
+            f"{{{block}:{self.scale_format}:{self.scaling}:{self.scaling_match}}}{rotation}{sparse}"
         )
 
     @property
@@ -90,6 +96,14 @@ class Scaled:
 
         if self.sparse_ratio:
             tensor, _, _ = Q.SparseFormat.split(tensor, self.sparse_ratio)
+        if self.rotation:
+            # Avoid rotating the vocabulary dimension, too large
+            rotation_dims = tuple(
+                d for d, s in enumerate(tensor.shape) if s <= MAX_ROTATION_SIZE
+            )
+            tensor, _ = Q.RandomRotationFormat.rotate(
+                tensor, rotation_dims, self.rotation
+            )
         format = Q.LinearScalingFormat(
             _scaled_element_format(
                 tensor,
@@ -107,6 +121,8 @@ class Scaled:
             self.block_shape,
             self.scaling,
         )
+        if self.rotation:
+            format = Q.RandomRotationFormat(format, rotation_dims, self.rotation)
         if self.sparse_ratio:
             format = Q.SparseFormat(format, self.sparse_format, self.sparse_ratio)
         return format

@@ -430,41 +430,47 @@ class ScaledFormat(ScalarFormat):
 @dataclass
 class RandomRotationFormat(TensorFormat):
     format: TensorFormat
-    dims: tuple[int]
+    dims: tuple[int, ...]
     seed: int
     _type: str = "random_rotation"
 
     def __str__(self) -> str:
         return f"{self.format}{{rot{list(self.dims)}}}"
 
-    def rotate(self, tensor: Tensor) -> tuple[Tensor, list[Tensor]]:
+    @staticmethod
+    def rotate(
+        tensor: Tensor, dims: tuple[int, ...], seed: int
+    ) -> tuple[Tensor, list[Tensor]]:
         """Returns (rotated, [rotations, ...])."""
-        generator = torch.Generator(tensor.device).manual_seed(self.seed)
+        generator = torch.Generator(tensor.device).manual_seed(seed)
         rotations = [
             torch.nn.init.orthogonal_(
                 torch.empty(tensor.shape[dim], tensor.shape[dim], device=tensor.device),
                 generator=generator,
             ).to(tensor.dtype)
-            for dim in self.dims
+            for dim in dims
         ]
-        for dim, rotation in zip(self.dims, rotations):
+        for dim, rotation in zip(dims, rotations):
             tensor = (tensor.movedim(dim, -1) @ rotation).movedim(-1, dim)
         return tensor, rotations
 
-    def unrotate(self, tensor: Tensor, rotations: list[Tensor]) -> Tensor:
-        for dim, rotation in zip(self.dims, rotations):
+    @staticmethod
+    def unrotate(
+        tensor: Tensor, dims: tuple[int, ...], rotations: list[Tensor]
+    ) -> Tensor:
+        for dim, rotation in zip(dims, rotations):
             tensor = (tensor.movedim(dim, -1) @ rotation.T).movedim(-1, dim)
         return tensor
 
     def quantise(self, tensor: Tensor) -> Tensor:
-        tensor, rotations = self.rotate(tensor)
-        return self.unrotate(self.format.quantise(tensor), rotations)
+        tensor, rotations = self.rotate(tensor, self.dims, self.seed)
+        return self.unrotate(self.format.quantise(tensor), self.dims, rotations)
 
     def count_bits(self, shape: Shape) -> int:
         return self.format.count_bits(shape)
 
     def count_bits_tensor(self, tensor: Tensor) -> float:
-        tensor, _ = self.rotate(tensor)
+        tensor, _ = self.rotate(tensor, self.dims, self.seed)
         return self.format.count_bits_tensor(tensor)
 
 

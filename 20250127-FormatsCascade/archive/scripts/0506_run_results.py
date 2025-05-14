@@ -201,6 +201,39 @@ def _element_formats() -> Iterable[ET.Test]:
                             yield ET.QuantiseFixed(fmt, error_weight=error_weight)
 
 
+def _rotations() -> Iterable[ET.Test]:
+    for element_bits in torch.arange(3, 5.01, 1).tolist():
+        for element_family, compressor, scaling, block_shape, sparse_ratio in [
+            ("int", "optimal", "rms", (None, None), 0),
+            ("t", None, "rms", (None, None), 2**-10),
+            ("t", None, "absmax", (1, 128), 0),
+            ("t", None, "absmax", (1, None), 0),
+            ("t", None, "absmax", (None, None), 0),
+            ("t", None, "rms", (None, None), 0),
+        ]:
+            for mode_args in (
+                [dict(mode="symmetric"), dict(mode="asymmetric")]
+                if element_family in ["normal", "laplace", "t"]
+                or (element_family, compressor) == ("int", None)
+                else [{}]
+            ):
+                for sparse_ratio in [0, 2**-10]:
+                    yield ET.QuantiseFixed(
+                        F.Scaled(
+                            element_bits=element_bits,
+                            element_family=element_family,
+                            scale_format=Q.BFLOAT16,
+                            block_shape=block_shape,
+                            scaling=scaling,
+                            sparse_format=Q.BFLOAT16,
+                            sparse_ratio=sparse_ratio,
+                            compressor=compressor,
+                            rotation=100,
+                            args=mode_args,
+                        )
+                    )
+
+
 if __name__ == "__main__":
     MOD_ALL = E.MODELS
     MOD_LLAMA8B = ["meta-llama/Llama-3.1-8B"]
@@ -225,6 +258,8 @@ if __name__ == "__main__":
     s.append(
         dict(name="elementformats", tests=list(_element_formats()), models=MOD_ALL)
     )
+
+    s.append(dict(name="rotations", tests=list(_rotations()), models=MOD_ALL))
 
     for sweep in s:
         print(
