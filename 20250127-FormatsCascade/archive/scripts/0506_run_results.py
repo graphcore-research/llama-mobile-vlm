@@ -203,35 +203,39 @@ def _element_formats() -> Iterable[ET.Test]:
 
 def _rotations() -> Iterable[ET.Test]:
     for element_bits in torch.arange(3, 5.01, 1).tolist():
-        for element_family, compressor, scaling, block_shape, sparse_ratio in [
-            ("int", "optimal", "rms", (None, None), 0),
-            ("t", None, "rms", (None, None), 2**-10),
-            ("t", None, "absmax", (1, 128), 0),
-            ("t", None, "absmax", (1, None), 0),
-            ("t", None, "absmax", (None, None), 0),
-            ("t", None, "rms", (None, None), 0),
+        yield ET.QuantiseFixed(
+            F.Scaled(
+                element_bits=element_bits,
+                element_family="int",
+                scale_format=Q.BFLOAT16,
+                block_shape=(None, None),
+                scaling="rms",
+                sparse_format=Q.BFLOAT16,
+                compressor="optimal",
+                rotation=100,
+            )
+        )
+        for scaling, block_shape, sparse_ratio in [
+            ("rms", (None, None), 2**-10),
+            ("absmax", (1, 128), 0),
+            ("absmax", (1, None), 0),
+            ("absmax", (None, None), 0),
+            ("rms", (None, None), 0),
         ]:
-            for mode_args in (
-                [dict(mode="symmetric"), dict(mode="asymmetric")]
-                if element_family in ["normal", "laplace", "t"]
-                or (element_family, compressor) == ("int", None)
-                else [{}]
-            ):
-                for sparse_ratio in [0, 2**-10]:
-                    yield ET.QuantiseFixed(
-                        F.Scaled(
-                            element_bits=element_bits,
-                            element_family=element_family,
-                            scale_format=Q.BFLOAT16,
-                            block_shape=block_shape,
-                            scaling=scaling,
-                            sparse_format=Q.BFLOAT16,
-                            sparse_ratio=sparse_ratio,
-                            compressor=compressor,
-                            rotation=100,
-                            args=mode_args,
-                        )
+            for mode in ["symmetric", "asymmetric"]:
+                yield ET.QuantiseFixed(
+                    F.Scaled(
+                        element_bits=element_bits,
+                        element_family="normal",
+                        scale_format=Q.BFLOAT16,
+                        block_shape=block_shape,
+                        scaling=scaling,
+                        sparse_format=Q.BFLOAT16,
+                        sparse_ratio=sparse_ratio,
+                        rotation=100,
+                        args=dict(mode=mode),
                     )
+                )
 
 
 if __name__ == "__main__":
