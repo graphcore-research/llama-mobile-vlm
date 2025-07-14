@@ -296,7 +296,7 @@ def fsdp_train(rank: int, init_method: str, settings: Settings) -> None:
 
 if __name__ == "__main__":
     el_fmts = ["E0M2"]
-    block_shapes = [(1, 32)]
+    block_shapes = [(None, None)]
     # block_shapes = [(None, None), (1, 32)]
     torch_compiles = [None, "default"]
     recomputations = [False, True]
@@ -357,45 +357,3 @@ if __name__ == "__main__":
             )
         except Exception:
             continue
-
-    # for el_fmt in el_fmts:
-    #     for block_shape in block_shapes:
-    #         for torch_compile in torch_compiles:
-    #             for impl in implementations:
-    #                 for recomp in recomputations:
-    #                     for train_centroids in trainable_centroidss:
-    #                         for wrap_teacher in wrap_teachers:
-    #                             settings = Settings(
-    #                                 run_name="test-time-v1",
-    #                                 model_name="meta-llama/Llama-3.2-11B-Vision-Instruct",
-    #                                 train_dataset="imagenet",
-    #                                 quantisation=QuantisationSettings(
-    #                                     el_fmt,
-    #                                     scale_fmt="BFLOAT16",
-    #                                     block_shape=block_shape,
-    #                                     implementation=impl,
-    #                                     trainable_centroids=train_centroids,
-    #                                 ),
-    #                                 training=TrainingSettings(
-    #                                     n_steps=10,
-    #                                     batch_size=8,
-    #                                     optimiser=OptimiserSettings(lr=1e-3),
-    #                                     lr_schedule=LRScheduleSettings(),
-    #                                 ),
-    #                                 execution=ExecutionSettings(
-    #                                     compile=torch_compile,
-    #                                     recomputation=recomp,
-    #                                     wrap_teacher=wrap_teacher,
-    #                                 ),
-    #                                 wandb=True,
-    #                                 memory_profile=False,
-    #                             )
-    #                             try:
-    #                                 mp.spawn(
-    #                                     fsdp_train,
-    #                                     args=("tcp://localhost:12345", settings),
-    #                                     nprocs=settings.execution.world_size,
-    #                                     join=True,
-    #                                 )
-    #                             except Exception:
-    #                                 continue
