@@ -91,13 +91,13 @@ def evaluate_run(run: Run) -> None:
 
 if __name__ == "__main__":
     # Set number of VQA examples
-    n_examples = 32
+    n_examples = 1024
 
     # Set batch size
     batch_size = 16
 
     # Set which runs
-    range = (3, 6)
+    range = (0, 6)
 
     # Load QAT runs
     api = wandb.Api()
