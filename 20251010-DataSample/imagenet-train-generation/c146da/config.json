@@ -1,0 +1,68 @@
+{
+  "model_name": "meta-llama/Llama-3.2-11B-Vision-Instruct",
+  "dataset_name": "imagenet",
+  "split": "train",
+  "prompt_config": {
+    "templates": [
+      "<|image|>{prompt}",
+      "<|start_header_id|>user<|end_header_id|>\n\n<|image|>{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    ],
+    "template_weights": [
+      0.25,
+      0.75
+    ],
+    "instructions": [
+      "Answer in as few words as possible.",
+      "Answer in as many words as possible.",
+      "Keep the response under 10 words.",
+      "Keep the response under 100 words.",
+      "Keep the response under 200 words.",
+      "Write a single concise sentence.",
+      "Write a few-sentence summary only.",
+      "Give a short bulleted list.",
+      "Give the answer only, no explanation.",
+      "Provide a short answer first, then an explanation.",
+      "List the two most important visual cues used.",
+      "Answer, then ask a follow-up question.",
+      "If text appears in the image, transcribe exactly.",
+      "If people or animals appear in the image, count them.",
+      "If multiple valid answers exist, rank them.",
+      "If the answer depends on unreadable details, say 'unclear'.",
+      "When answering with a list, sort items alphabetically.",
+      "Use simple language when answering."
+    ],
+    "prompts": [
+      "Describe the image.",
+      "Write an appropriate caption.",
+      "Summarize the scene in the image.",
+      "Write a news article about the image.",
+      "Write a book chapter based on what you see.",
+      "Describe the layout from left to right.",
+      "Transcribe all legible text.",
+      "What is the main object visible?",
+      "What are the main colors appearing in the image?",
+      "How many persons or animals do you see?",
+      "Is motion implied? How?",
+      "What time of day does this appear to be?",
+      "Does anything look out of place?",
+      "Which features suggest the location or region?",
+      "What material or texture stands out most?",
+      "Which part of the image draws attention first and why?",
+      "What is unclear or ambiguous in this image?"
+    ],
+    "instruction_prob": 0.75,
+    "seed": 693785
+  },
+  "seed": null,
+  "data_range": [
+    0,
+    2048
+  ],
+  "n_generated_tokens": 512,
+  "sampling_settings": {
+    "do_sample": true,
+    "temperature": 0.6,
+    "top_p": 0.9
+  },
+  "created at": "2025-10-09T23:12:38"
+}
