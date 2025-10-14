@@ -525,10 +525,16 @@ def text_model(
     hidden = rms_norm(hidden, params.final_norm)
     return hidden @ params.unembedding.T
 
-def generate(config: Config, params: Params, inputs: Inputs, n_generated_tokens: int) -> Iterable[int]:
+
+def generate(
+    config: Config, params: Params, inputs: Inputs, n_generated_tokens: int
+) -> Iterable[int]:
     with torch.no_grad():
         hidden = vision_model(config.vision, params.vision, inputs)
-        vision_out = (hidden @ params.vision_text_projection.T + params.vision_text_projection_bias).flatten(end_dim=-2)
+        vision_out = (
+            hidden @ params.vision_text_projection.T
+            + params.vision_text_projection_bias
+        ).flatten(end_dim=-2)
         text = inputs.text
         for _ in range(n_generated_tokens):
             logits = text_model(config.text, params.text, text, vision_out)
