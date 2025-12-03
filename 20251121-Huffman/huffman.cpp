@@ -42,6 +42,12 @@ std::ostream& operator<<(std::ostream& os, const Code& code) {
     return os;
 }
 
+using Histogram = std::vector<uint64_t>;
+using Codebook = std::vector<std::optional<Code>>;
+
+// -------------------------------------------------------------------------------------------------
+// Utilities
+
 uint log2_ceil(uint64_t n) {
     uint l = 0;
     uint64_t v = 1;
@@ -52,11 +58,19 @@ uint log2_ceil(uint64_t n) {
     return l;
 }
 
-using Histogram = std::vector<uint64_t>;
-using Codebook = std::vector<std::optional<Code>>;
-
-// -------------------------------------------------------------------------------------------------
-// Utilities
+void flushCache() {
+    // Allocate a buffer larger than the largest cache
+    using Element = uint64_t;
+    const size_t cacheFlushSize = 512 * 1024 * 1024 / sizeof(Element);
+    static std::vector<Element> cacheFlushBuffer(cacheFlushSize);
+    for (auto n = 0; n < 3; ++n) {
+        // Read-modify-write seems better than write-only for flushing caches
+#pragma omp parallel for schedule(static)
+        for (auto i = 0ull; i < cacheFlushBuffer.size(); ++i) {
+            cacheFlushBuffer[i] += 1;
+        }
+    }
+}
 
 Codebook generate_huffman_codes(const std::shared_ptr<Node>& root) {
     Codebook codes;
@@ -308,16 +322,15 @@ Codebook build_codes_fallback(const Histogram& hist, uint max_length) {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Driver script
+// Driver scripts
 
-int main() {
+void test_huffman_codes() {
     // Read histogram (see generate_hist.py)
     std::vector<uint64_t> hist(256);
     std::ifstream hist_file("build/hist.bin", std::ios::binary);
     hist_file.read(reinterpret_cast<char*>(hist.data()), hist.size() * sizeof(uint64_t));
     if (!hist_file) {
-        std::cerr << "Failed to read histogram data." << std::endl;
-        return 1;
+        throw std::runtime_error("Failed to read histogram data");
     }
     std::cerr << "[huffman.cpp] Read histogram of " << hist.size() << " symbols." << std::endl;
 
@@ -335,5 +348,87 @@ int main() {
     std::cout << "\n--- Two-stage Huffman (max_code_length=8) ---" << std::endl;
     auto codes_2stage = build_codes_fallback(hist, 8);
     show_codes(hist, codes_2stage, /*max_length*/ 8);
+}
+
+struct Measurement {
+    std::vector<double> samples;
+
+    double mean() const {
+        double sum = std::accumulate(samples.begin(), samples.end(), 0.0);
+        return sum / samples.size();
+    }
+    double standard_error() const {
+        double m = mean();
+        double sum_sq = 0.0;
+        for (double s : samples) {
+            sum_sq += (s - m) * (s - m);
+        }
+        return std::sqrt(sum_sq / (samples.size() - 1)) / std::sqrt(samples.size());
+    }
+};
+std::ostream& operator<<(std::ostream& out, const Measurement& m) {
+    auto mean = m.mean();
+    auto error = m.standard_error();
+    std::string units = " ";
+    auto divisor = 1.0;
+    if (mean >= 1e9) {
+        divisor = 1e9;
+        units = " G";
+    } else if (mean >= 1e6) {
+        divisor = 1e6;
+        units = " M";
+    } else if (mean >= 1e3) {
+        divisor = 1e3;
+        units = " k";
+    }
+    return out << mean / divisor << " ± " << error / divisor << units;
+}
+
+template <class Benchmark>
+Measurement benchmark_transfer(Benchmark&& benchmark, uint runs, uint pre_runs) {
+    std::vector<double> results;
+    for (uint i = 0; i < runs + pre_runs; ++i) {
+        flushCache();
+        auto start = std::chrono::high_resolution_clock::now();
+        benchmark.runonce();
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end - start;
+        results.push_back(benchmark.bytes_per_run() / elapsed.count());
+    }
+    results.erase(results.begin(), results.begin() + pre_runs);
+    return Measurement{results};
+}
+
+struct BenchmarkMemcpy {
+    using Element = uint64_t;
+    std::vector<Element> src;
+    std::vector<Element> dst;
+
+    BenchmarkMemcpy(size_t size) : src(size / sizeof(Element)), dst(size / sizeof(Element)) {
+        std::iota(src.begin(), src.end(), 0);
+    }
+
+    uint64_t bytes_per_run() const { return 2 * src.size() * sizeof(Element); }
+
+    __attribute__((noinline)) void runonce() {
+#pragma omp parallel for
+        for (auto i = 0u; i < src.size(); i++) {
+            dst[i] = src[i];
+        }
+    }
+};
+
+int main() {
+    std::cerr << "[huffman.cpp] running" << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // test_huffman_codes();
+
+    BenchmarkMemcpy benchmark(10 * 1024 * 1024);
+    auto measurement = benchmark_transfer(benchmark, 40, /*pre_runs*/ 10);
+    std::cout << "Memcpy throughput: " << measurement << "B/s" << std::endl;
+
+    std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
+    std::cerr << "[huffman.cpp] finished in " << elapsed.count() << " seconds" << std::endl;
     return 0;
 }

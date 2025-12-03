@@ -1,7 +1,10 @@
 # Rules & variables
 builddir = build
+flags = -std=c++17 -stdlib=libc++ -O3 -fopenmp -Wall -Wextra -Werror
 rule compile
-  command = clang++ -std=c++17 -O3 -Wall -Wextra -Werror -o $out $in
+  command = clang++ $flags -o $out $in
+rule compile_asm
+  command = clang++ $flags -S -o $out $in
 rule runpy
   command = python $in $args > $out
 rule run
@@ -10,6 +13,7 @@ rule run
 # Targets
 build $builddir/hist.bin: runpy generate_hist.py
 build $builddir/huffman: compile huffman.cpp
+build $builddir/huffman.s: compile_asm huffman.cpp
 
 build run: run $builddir/huffman | $builddir/hist.bin
 default run
