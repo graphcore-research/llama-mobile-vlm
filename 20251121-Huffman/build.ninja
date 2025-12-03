@@ -1,0 +1,15 @@
+# Rules & variables
+builddir = build
+rule compile
+  command = clang++ -std=c++17 -O3 -Wall -Wextra -Werror -o $out $in
+rule runpy
+  command = python $in $args > $out
+rule run
+  command = $in $args
+
+# Targets
+build $builddir/hist.bin: runpy generate_hist.py
+build $builddir/huffman: compile huffman.cpp
+
+build run: run $builddir/huffman | $builddir/hist.bin
+default run
