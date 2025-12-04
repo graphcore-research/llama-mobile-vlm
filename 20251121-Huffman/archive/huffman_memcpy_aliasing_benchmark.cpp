@@ -1,4 +1,3 @@
-#include <omp.h>
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -10,21 +9,12 @@
 #include <memory>
 #include <numeric>
 #include <optional>
-#include <random>
 #include <vector>
-
-#ifdef __aarch64__
-#include <arm_neon.h>
-#endif
 
 // -------------------------------------------------------------------------------------------------
 // Basic types
 
 using Symbol = uint8_t;
-
-// `byte` is a uint8, which does not have the aliasing rules issues of std::byte or uint8_t
-enum class byte : uint8_t {};
-static_assert(sizeof(byte) == 1, "byte must be 1 byte");
 
 struct Node {
     uint64_t freq;
@@ -67,22 +57,6 @@ uint log2_ceil(uint64_t n) {
         l++;
     }
     return l;
-}
-
-template <class T>
-std::string type_name() {
-    if (std::is_same<T, uint8_t>::value) return "uint8_t";
-    if (std::is_same<T, uint16_t>::value) return "uint16_t";
-    if (std::is_same<T, uint32_t>::value) return "uint32_t";
-    if (std::is_same<T, uint64_t>::value) return "uint64_t";
-    if (std::is_same<T, int8_t>::value) return "int8_t";
-    if (std::is_same<T, int16_t>::value) return "int16_t";
-    if (std::is_same<T, int32_t>::value) return "int32_t";
-    if (std::is_same<T, int64_t>::value) return "int64_t";
-    if (std::is_same<T, std::byte>::value) return "std::byte";
-    if (std::is_same<T, char8_t>::value) return "char8_t";
-    if (std::is_same<T, byte>::value) return "byte";
-    return typeid(T).name();
 }
 
 void flushCache() {
@@ -386,7 +360,7 @@ std::ostream& operator<<(std::ostream& out, const Measurement& m) {
 }
 
 template <class Benchmark>
-Measurement run_benchmark(Benchmark&& benchmark, uint runs, uint pre_runs) {
+Measurement benchmark_transfer(Benchmark&& benchmark, uint runs, uint pre_runs) {
     std::vector<double> results;
     for (uint i = 0; i < runs + pre_runs; ++i) {
         flushCache();
@@ -400,295 +374,71 @@ Measurement run_benchmark(Benchmark&& benchmark, uint runs, uint pre_runs) {
     return Measurement{results};
 }
 
-template <class Element>
+enum class byte : uint8_t {};
+static_assert(sizeof(byte) == 1, "byte must be 1 byte");
+
+template <class Element = uint64_t>
 struct BenchmarkMemcpy {
     std::vector<Element> src;
     std::vector<Element> dst;
 
-    explicit BenchmarkMemcpy(size_t size)
-        : src(size / sizeof(Element)), dst(size / sizeof(Element)) {}
-    uint64_t bytes_per_run() const { return 2 * src.size() * sizeof(Element); }
-    std::string name() const { return "Memcpy<" + type_name<Element>() + ">"; }
-    void runonce() { benchmark_memcpy(dst.data(), src.data(), src.size()); }
+    BenchmarkMemcpy(size_t size) : src(size / sizeof(Element)), dst(size / sizeof(Element)) {}
 
-    __attribute__((noinline)) static void benchmark_memcpy(Element* __restrict__ dst,
-                                                           const Element* __restrict__ src,
-                                                           size_t count) {
+    uint64_t bytes_per_run() const { return 2 * src.size() * sizeof(Element); }
+
+    __attribute__((noinline)) void runonce() {
+        const auto count = src.size();
+        const Element* src_ptr = src.data();
+        Element* dst_ptr = dst.data();
 #pragma omp parallel for
         for (size_t i = 0u; i < count; ++i) {
-            dst[i] = src[i];
+            dst_ptr[i] = src_ptr[i];
         }
     }
 };
 
-template <class Element>
+template <class Element = uint64_t>
 struct BenchmarkIncrement {
     std::vector<Element> src;
     std::vector<Element> dst;
 
-    explicit BenchmarkIncrement(size_t size)
-        : src(size / sizeof(Element)), dst(size / sizeof(Element)) {}
+    BenchmarkIncrement(size_t size) : src(size / sizeof(Element)), dst(size / sizeof(Element)) {
+        std::iota(src.begin(), src.end(), 0);
+    }
+
     uint64_t bytes_per_run() const { return 2 * src.size() * sizeof(Element); }
-    std::string name() const { return "Increment<" + type_name<Element>() + ">"; }
-    void runonce() { benchmark_increment(dst.data(), src.data(), src.size()); }
 
-    __attribute__((noinline)) static void benchmark_increment(Element* __restrict__ dst,
-                                                              const Element* __restrict__ src,
-                                                              size_t count) {
+    __attribute__((noinline)) void runonce() {
 #pragma omp parallel for
-        for (size_t i = 0u; i < count; ++i) {
-            dst[i] = static_cast<Element>(static_cast<uint>(src[i]) + 1);
+        for (auto i = 0u; i < src.size(); i++) {
+            dst[i] = src[i] + 1;
         }
     }
 };
 
-template <class Element, class Accumulator = uint32_t>
-struct BenchmarkReduceSum {
-    std::vector<Element> src;
-    Accumulator dst;
-
-    explicit BenchmarkReduceSum(size_t size) : src(size / sizeof(Element)), dst(0) {}
-    std::string name() const {
-        return "ReduceSum<" + type_name<Element>() + ", " + type_name<Accumulator>() + ">";
-    }
-    uint64_t bytes_per_run() const { return src.size() * sizeof(Element) + sizeof(Accumulator); }
-    void runonce() { benchmark_reduce_sum(&dst, src.data(), src.size()); }
-
-    __attribute__((noinline)) static void benchmark_reduce_sum(Accumulator* __restrict__ dst,
-                                                               const Element* src,
-                                                               size_t count) {
-        Accumulator sum = 0;
-#pragma omp parallel for reduction(+ : sum)
-        for (size_t i = 0u; i < count; ++i) {
-            sum += static_cast<Accumulator>(src[i]);
-        }
-        *dst = sum;
-    }
-};
-
-enum class LookupOp { Memory, Tbl1, Tbl4, Tbl4x2 };
-std::ostream& operator<<(std::ostream& out, LookupOp op) {
-    switch (op) {
-        case LookupOp::Memory:
-            return out << "Memory";
-        case LookupOp::Tbl1:
-            return out << "Tbl1";
-        case LookupOp::Tbl4:
-            return out << "Tbl4";
-        case LookupOp::Tbl4x2:
-            return out << "Tbl4x2";
-        default:
-            assert(false && "Unknown LookupOp");
-            return out;
-    }
-}
-
-template <class Index, class Element>
+template <class Element = uint64_t>
 struct BenchmarkTableLookup {
-    std::vector<Index> src;
+    std::vector<Element> src;
+    std::vector<Element> dst;
     std::vector<Element> table;
-    uint32_t dst;
-    LookupOp op;
 
-    explicit BenchmarkTableLookup(size_t indices, size_t table_entries, LookupOp op)
-        : src(indices), table(table_entries, Element(1)), dst(0), op(op) {
-        std::default_random_engine rng(12345);
-        std::uniform_int_distribution<uint32_t> dist(0, table_entries - 1);
-        for (auto& index : src) {
-            index = static_cast<Index>(dist(rng));
-        }
-        if (op == LookupOp::Tbl1) {
-            static_assert(sizeof(Index) == 1, "Tbl1 only supports Index of size 1 byte");
-            assert(table_entries == 16 && "Tbl1 only supports 16 table entries");
-        }
-        if (op == LookupOp::Tbl4) {
-            static_assert(sizeof(Index) == 1, "Tbl4 only supports Index of size 1 byte");
-            assert(table_entries == 64 && "Tbl4 only supports 64 table entries");
-        }
-        if (op == LookupOp::Tbl4x2) {
-            static_assert(sizeof(Index) == 1, "Tbl4x2 only supports Index of size 1 byte");
-            assert(table_entries == 128 && "Tbl4x2 only supports 128 table entries");
-        }
-    }
-    std::string name() const {
-        std::ostringstream ss;
-        ss << "TableLookup<" << type_name<Index>() << ", " << type_name<Element>() << ">(" << op
-           << ")";
-        return ss.str();
-    }
-    uint64_t bytes_per_run() const {
-        return src.size() * sizeof(Index) + table.size() * sizeof(Element) + sizeof(uint32_t);
-    }
-    void runonce() { benchmark_table_lookup(&dst, src.data(), table.data(), src.size(), op); }
-
-    static uint32_t benchmark_table_lookup_thread(const Index* __restrict__ src,
-                                                  const Element* __restrict__ table,
-                                                  size_t count,
-                                                  LookupOp op) {
-        if (op == LookupOp::Memory) {
-            uint32_t sum = 0;
-            for (size_t i = 0; i < count; ++i) {
-                sum += static_cast<uint32_t>(table[static_cast<size_t>(src[i])]);
-            }
-            return sum;
-        }
-        if (op == LookupOp::Tbl1) {
-            uint8x16_t vtable = vld1q_u8(&table[0]);
-            uint8x16_t vsum = vdupq_n_u8(0);
-            for (size_t i = 0; i < count; i += 16) {
-                uint8x16_t vindices = vld1q_u8(reinterpret_cast<const uint8_t*>(&src[i]));
-                uint8x16_t vresult = vqtbl1q_u8(vtable, vindices);
-                vsum = vaddq_u8(vsum, vresult);
-            }
-            return vaddvq_u8(vsum);
-        }
-        if (op == LookupOp::Tbl4) {
-            uint8x16x4_t vtable = {vld1q_u8(&table[0]), vld1q_u8(&table[16]), vld1q_u8(&table[32]),
-                                   vld1q_u8(&table[48])};
-            uint8x16_t vsum = vdupq_n_u8(0);
-            for (size_t i = 0; i < count; i += 16) {
-                uint8x16_t vindices = vld1q_u8(reinterpret_cast<const uint8_t*>(&src[i]));
-                uint8x16_t vresult = vqtbl4q_u8(vtable, vindices);
-                vsum = vaddq_u8(vsum, vresult);
-            }
-            return vaddvq_u8(vsum);
-        }
-        if (op == LookupOp::Tbl4x2) {
-            uint8x16x4_t vtable1 = {vld1q_u8(&table[0]), vld1q_u8(&table[16]),
-                                    vld1q_u8(&table[32]), vld1q_u8(&table[48])};
-            uint8x16x4_t vtable2 = {vld1q_u8(&table[64]), vld1q_u8(&table[80]),
-                                    vld1q_u8(&table[96]), vld1q_u8(&table[112])};
-            uint8x16_t vsum = vdupq_n_u8(0);
-            for (size_t i = 0; i < count; i += 16) {
-                uint8x16_t vindices = vld1q_u8(reinterpret_cast<const uint8_t*>(&src[i]));
-                uint8x16_t vresult1 = vqtbl4q_u8(vtable1, vindices);
-                uint8x16_t vresult2 = vqtbl4q_u8(vtable2, vindices);
-                vsum = vaddq_u8(vsum, vresult1);
-                vsum = vaddq_u8(vsum, vresult2);
-            }
-            return vaddvq_u8(vsum);
-        }
-        assert(false && "Unknown LookupOp");
-        return 0;
+    BenchmarkTableLookup(size_t size)
+        : src(size / sizeof(Element)), dst(size / sizeof(Element)), table(256) {
+        std::iota(src.begin(), src.end(), 0);
     }
 
-    __attribute__((noinline)) static void benchmark_table_lookup(uint32_t* __restrict__ dst,
-                                                                 const Index* __restrict__ src,
-                                                                 const Element* __restrict__ table,
-                                                                 size_t count,
-                                                                 LookupOp op) {
-        assert(count % omp_get_max_threads() == 0);
-        auto chunk_size = count / omp_get_max_threads();
-        uint32_t sum = 0;
-#pragma omp parallel
-        {
-            uint32_t local_sum = benchmark_table_lookup_thread(
-                &src[omp_get_thread_num() * chunk_size], table, chunk_size, op);
-#pragma omp atomic
-            sum += local_sum;
+    uint64_t bytes_per_run() const { return 2 * src.size() * sizeof(Element); }
+
+    __attribute__((noinline)) void runonce() {
+#pragma omp parallel for
+        for (auto i = 0u; i < src.size(); i++) {
+            dst[i] = src[i] + 1;
         }
-        *dst = sum;
     }
 };
 
 // -------------------------------------------------------------------------------------------------
 // Driver scripts
-
-void demo_luti4() {
-#ifdef __aarch64__
-    {
-        std::cout << "\n--- ARM64 vqtbl1q_u8 Demo ---" << std::endl;
-
-        // Create a lookup table with 16 entries (4-bit indices)
-        uint8_t table_data[16] = {10, 20,  30,  40,  50,  60,  70,  80,
-                                  90, 100, 110, 120, 130, 140, 150, 160};
-        uint8x16_t lut = vld1q_u8(table_data);
-
-        // Create indices (4-bit values packed into bytes)
-        uint8_t indices_data[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-        uint8x16_t indices = vld1q_u8(indices_data);
-
-        // Perform 4-bit table lookup
-        uint8x16_t result = vqtbl1q_u8(lut, indices);
-
-        // Print results
-        uint8_t output[16];
-        vst1q_u8(output, result);
-
-        std::cout << "Lookup Table: ";
-        for (int i = 0; i < 16; i++) {
-            std::cout << static_cast<int>(table_data[i]) << " ";
-        }
-        std::cout << "\n";
-
-        std::cout << "Indices:      ";
-        for (int i = 0; i < 16; i++) {
-            std::cout << static_cast<int>(indices_data[i]) << " ";
-        }
-        std::cout << "\n";
-
-        std::cout << "Results:      ";
-        for (int i = 0; i < 16; i++) {
-            std::cout << static_cast<int>(output[i]) << " ";
-        }
-        std::cout << "\n";
-    }
-    {
-        std::cout << "\n--- ARM64 vqtbl4q_u8 Demo ---" << std::endl;
-
-        // Create 4 lookup tables, each with 16 entries (supports 64-entry table)
-        uint8_t table_data[64] = {
-            11, 12, 13, 14, 15, 16, 17, 18,  // table 0
-            19, 20, 21, 22, 23, 24, 25, 26,  // table 0
-            31, 32, 33, 34, 35, 36, 37, 38,  // table 1
-            39, 40, 41, 42, 43, 44, 45, 46,  // table 1
-            51, 52, 53, 54, 55, 56, 57, 58,  // table 2
-            59, 60, 61, 62, 63, 64, 65, 66,  // table 2
-            71, 72, 73, 74, 75, 76, 77, 78,  // table 3
-            79, 80, 81, 82, 83, 84, 85, 86   // table 3
-        };
-
-        // Load 4 tables of 16 entries each
-        uint8x16_t lut0 = vld1q_u8(&table_data[0]);
-        uint8x16_t lut1 = vld1q_u8(&table_data[16]);
-        uint8x16_t lut2 = vld1q_u8(&table_data[32]);
-        uint8x16_t lut3 = vld1q_u8(&table_data[48]);
-
-        // Create indices (6-bit values to index into 64-entry table)
-        uint8_t indices_data[16] = {0, 1, 2, 3, 16, 17, 18, 19, 32, 33, 34, 35, 48, 49, 50, 51};
-        uint8x16_t indices = vld1q_u8(indices_data);
-
-        // Perform table lookup across 4 tables using vqtbl4q_u8
-        uint8x16x4_t tables = {lut0, lut1, lut2, lut3};
-        uint8x16_t result = vqtbl4q_u8(tables, indices);
-
-        // Print results
-        uint8_t output[16];
-        vst1q_u8(output, result);
-
-        std::cout << "Lookup Tables (64 entries total): ";
-        for (int i = 0; i < 64; i++) {
-            std::cout << static_cast<int>(table_data[i]) << " ";
-        }
-        std::cout << "\n";
-
-        std::cout << "Indices (6-bit):                  ";
-        for (int i = 0; i < 16; i++) {
-            std::cout << static_cast<int>(indices_data[i]) << " ";
-        }
-        std::cout << "\n";
-
-        std::cout << "Results:                          ";
-        for (int i = 0; i < 16; i++) {
-            std::cout << static_cast<int>(output[i]) << " ";
-        }
-        std::cout << "\n";
-    }
-
-#else
-    std::cout << "vqtbl4q_u8 demo only available on ARM64 architecture" << std::endl;
-#endif
-}
 
 void test_huffman_codes() {
     // Read histogram (see generate_hist.py)
@@ -716,52 +466,27 @@ void test_huffman_codes() {
     show_codes(hist, codes_2stage, /*max_length*/ 8);
 }
 
-void run_benchmarks() {
-    auto run = [](auto&& benchmark) {
-        auto measurement = run_benchmark(benchmark, 40, /*pre_runs*/ 10);
-        std::cerr << benchmark.name() << " :: " << measurement << "B/s" << std::endl;
-    };
-
-    const size_t data_size = 100 * 1024 * 1024;
-    // run(BenchmarkMemcpy<uint32_t>(data_size));
-    // run(BenchmarkMemcpy<uint8_t>(data_size));
-    run(BenchmarkMemcpy<byte>(data_size));
-
-    // run(BenchmarkIncrement<uint32_t>(data_size));
-    // run(BenchmarkIncrement<uint8_t>(data_size));
-    run(BenchmarkIncrement<byte>(data_size));
-
-    // run(BenchmarkReduceSum<uint32_t>(data_size));
-    // run(BenchmarkReduceSum<uint16_t>(data_size));
-    run(BenchmarkReduceSum<uint8_t>(data_size));
-    // run(BenchmarkReduceSum<byte, uint32_t>(data_size));
-
-    const size_t n_indices = 16 * 1024 * 1024;
-    // run(BenchmarkTableLookup<uint16_t, uint64_t>(n_indices, 1 << 16));
-    // run(BenchmarkTableLookup<uint16_t, uint32_t>(n_indices, 1 << 16));
-    // run(BenchmarkTableLookup<uint16_t, uint32_t>(n_indices, 1 << 14));
-    // run(BenchmarkTableLookup<uint16_t, uint32_t>(n_indices, 1 << 12));
-    // run(BenchmarkTableLookup<uint16_t, uint32_t>(n_indices, 1 << 8));
-    // run(BenchmarkTableLookup<uint16_t, uint32_t>(n_indices, 1 << 4));
-
-    run(BenchmarkTableLookup<uint8_t, uint8_t>(n_indices, 64, LookupOp::Memory));
-    run(BenchmarkTableLookup<uint8_t, uint8_t>(n_indices, 16, LookupOp::Tbl1));
-    run(BenchmarkTableLookup<uint8_t, uint8_t>(n_indices, 64, LookupOp::Tbl4));
-    run(BenchmarkTableLookup<uint8_t, uint8_t>(n_indices, 128, LookupOp::Tbl4x2));
-    // run(BenchmarkTableLookup<uint8_t, uint16_t>(n_indices, 64));
-    // run(BenchmarkTableLookup<byte, byte>(n_indices, 64));
-}
-
 int main() {
-    omp_set_num_threads(omp_get_max_threads());
-    // omp_set_num_threads(1);
-
-    std::cerr << "[huffman.cpp] running on " << omp_get_max_threads() << " threads" << std::endl;
+    std::cerr << "[huffman.cpp] running" << std::endl;
     auto start = std::chrono::high_resolution_clock::now();
 
-    // demo_luti4();
     // test_huffman_codes();
-    run_benchmarks();
+    auto run = [](auto&& benchmark, const std::string& name) {
+        auto measurement = benchmark_transfer(benchmark, 40, /*pre_runs*/ 10);
+        std::cout << name << " :: " << measurement << "B/s" << std::endl;
+    };
+
+    run(BenchmarkMemcpy<uint64_t>(10 * 1024 * 1024), "Memcpy (uint64_t) ");
+    run(BenchmarkMemcpy<uint32_t>(10 * 1024 * 1024), "Memcpy (uint32_t) ");
+    run(BenchmarkMemcpy<uint16_t>(10 * 1024 * 1024), "Memcpy (uint16_t) ");
+    run(BenchmarkMemcpy<uint8_t>(10 * 1024 * 1024), "Memcpy (uint8_t)  ");
+    run(BenchmarkMemcpy<int8_t>(10 * 1024 * 1024), "Memcpy (int8_t)   ");
+    run(BenchmarkMemcpy<std::byte>(10 * 1024 * 1024), "Memcpy (std::byte)");
+    run(BenchmarkMemcpy<char8_t>(10 * 1024 * 1024), "Memcpy (char8_t)  ");
+    run(BenchmarkMemcpy<byte>(10 * 1024 * 1024), "Memcpy (byte)     ");
+    // run(BenchmarkIncrement<uint64_t>(10 * 1024 * 1024), "Increment (uint64_t)");
+    // run(BenchmarkIncrement<uint32_t>(10 * 1024 * 1024), "Increment (uint32_t)");
+    // run(BenchmarkIncrement<uint8_t>(10 * 1024 * 1024), "Increment (uint8_t)");
 
     std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
     std::cerr << "[huffman.cpp] finished in " << elapsed.count() << " seconds" << std::endl;

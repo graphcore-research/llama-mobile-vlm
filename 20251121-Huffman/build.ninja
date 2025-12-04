@@ -1,10 +1,14 @@
 # Rules & variables
 builddir = build
-flags = -std=c++17 -stdlib=libc++ -O3 -fopenmp -Wall -Wextra -Werror
+cxx = clang++
+flags = -std=c++20 -stdlib=libc++ -O3 -fopenmp -Wall -Wextra -Werror -march=native -mcpu=native -fcolor-diagnostics
+# cxx = g++
+# flags = -std=c++20 -O3 -fopenmp -Wall -Wextra -Werror -march=native -mcpu=native
+
 rule compile
-  command = clang++ $flags -o $out $in
+  command = $cxx $flags -o $out $in
 rule compile_asm
-  command = clang++ $flags -S -o $out $in
+  command = $cxx $flags -S -o $out $in
 rule runpy
   command = python $in $args > $out
 rule run
