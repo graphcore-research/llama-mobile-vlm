@@ -1,23 +1,6 @@
-#include <omp.h>
-#include <algorithm>
-#include <cassert>
-#include <chrono>
-#include <cmath>
-#include <fstream>
-#include <functional>
-#include <iostream>
-#include <iterator>
-#include <memory>
-#include <numeric>
-#include <optional>
-#include <random>
-#include <vector>
-
-#ifdef __aarch64__
-#include <arm_neon.h>
-#endif
-
 #include "common.hpp"
+
+#include <fstream>
 
 // -------------------------------------------------------------------------------------------------
 // Basic types
