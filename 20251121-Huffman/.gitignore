@@ -1,5 +1,5 @@
 .venv
 .vscode
 
-/build
-/local
+build/
+local/

@@ -16,8 +16,10 @@ rule run
 
 # Targets
 build $builddir/hist.bin: runpy generate_hist.py
-build $builddir/huffman: compile huffman.cpp
-build $builddir/huffman.s: compile_asm huffman.cpp
+build $builddir/huffman: compile src/huffman.cpp
+build $builddir/huffman.s: compile_asm src/huffman.cpp
+build $builddir/benchmarks: compile src/benchmarks.cpp
+build $builddir/benchmarks.s: compile_asm src/benchmarks.cpp
 
 build run: run $builddir/huffman | $builddir/hist.bin
 default run
