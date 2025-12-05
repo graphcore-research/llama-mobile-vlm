@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#include <bitset>
 #include <fstream>
 
 // -------------------------------------------------------------------------------------------------
@@ -300,7 +301,81 @@ Codebook build_codes_fallback(const Histogram& hist, uint max_length) {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Benchmarks
+// Decoders
+
+/*
+ * Write an LSB-first bitstream. E.g. with uint8_t
+ *                              data[0]   data[1]
+ *  write_bits(0b101, 3)   -> 0000'0101
+ *  write_bits(0b11, 2)    -> 0001'1101
+ *  write_bits(0b10011, 5) -> 0111'1101 0000'0010
+ */
+template <class T>
+struct BitStreamWriter {
+    constexpr static uint8_t T_bits = sizeof(T) * 8;
+    std::vector<T> data;
+    uint8_t bits_filled;
+
+    BitStreamWriter() : bits_filled(0) { data.push_back(0); }
+
+    size_t size() const { return (data.size() - 1) * T_bits + bits_filled; }
+
+    void write_bits(T bits, uint8_t n_bits) {
+        bits &= ~T(0) >> (sizeof(T) * 8 - n_bits);
+        auto to_write = std::min<uint8_t>(n_bits, T_bits - bits_filled);
+        data.back() |= (bits << bits_filled);
+        bits_filled += to_write;
+        if (bits_filled == T_bits) {
+            data.push_back(0);
+            bits_filled = 0;
+        }
+        // write any remaining bits
+        bits >>= to_write;
+        n_bits -= to_write;
+        if (n_bits > 0) {
+            write_bits(bits, n_bits);
+        }
+    }
+};
+
+std::ostream& operator<<(std::ostream& out, const BitStreamWriter<uint32_t>& bsw) {
+    for (auto i = 0u; i < bsw.data.size(); ++i) {
+        auto n_bits = (i + 1 == bsw.data.size()) ? bsw.bits_filled : 32u;
+        for (auto j = 0u; j < n_bits; ++j) {
+            out << ((bsw.data[i] >> j) & 1);
+        }
+    }
+    return out;
+}
+
+struct TableEntry {
+    Symbol value;
+    uint8_t n_bits;
+};
+
+template <uint32_t table_index_bits>
+__attribute__((noinline)) uint32_t decode_basic(const uint32_t* data,
+                                                size_t total_bits,
+                                                const TableEntry* table) {
+    constexpr uint32_t index_mask = (1u << table_index_bits) - 1;
+    auto sum = 0u;
+    const uint32_t* data_ptr = data;
+    uint64_t current = *data_ptr++;
+    uint32_t current_bits = 32;
+    for (size_t offset = 0; offset < total_bits;) {
+        if (current_bits < table_index_bits) {
+            current |= static_cast<uint64_t>(*data_ptr++) << current_bits;
+            current_bits += 32;
+        }
+        auto index = current & index_mask;
+        auto entry = table[index];
+        sum += entry.value;
+        offset += entry.n_bits;
+        current >>= entry.n_bits;
+        current_bits -= entry.n_bits;
+    }
+    return sum;
+}
 
 // -------------------------------------------------------------------------------------------------
 // Driver scripts
@@ -331,14 +406,122 @@ void test_huffman_codes() {
     show_codes(hist, codes_2stage, /*max_length*/ 8);
 }
 
+void test_decode_basic() {
+    std::vector<TableEntry> table({
+        {10, 1},  // 000
+        {20, 2},  // 001
+        {10, 1},  // 010
+        {30, 3},  // 011
+        {10, 1},  // 100
+        {20, 2},  // 101
+        {10, 1},  // 110
+        {40, 3}   // 111
+    });
+
+    BitStreamWriter<uint32_t> bsw;
+    for (int i = 0; i < 10; ++i) {
+        bsw.write_bits(0b0, 1);    // 10
+        bsw.write_bits(0b01, 2);   // 20
+        bsw.write_bits(0b011, 3);  // 30
+        bsw.write_bits(0b111, 3);  // 40
+    }
+    assert(bsw.size() == 10 * 9);
+    std::cerr << bsw << std::endl;
+
+    auto sum = decode_basic<3>(bsw.data.data(), bsw.size(), table.data());
+    assert(sum == (10 + 20 + 30 + 40) * 10);
+}
+
+uint32_t reverse_bits(uint32_t bits, uint8_t n_bits) {
+    uint32_t reversed = 0;
+    for (uint8_t i = 0; i < n_bits; ++i) {
+        reversed <<= 1;
+        reversed |= (bits & 1);
+        bits >>= 1;
+    }
+    return reversed;
+}
+
+template <uint32_t table_index_bits>
+struct BenchmarkDecodeBasic {
+    BitStreamWriter<uint32_t> src;
+    std::vector<TableEntry> table;
+    uint32_t sum;
+
+    explicit BenchmarkDecodeBasic(const BitStreamWriter<uint32_t>& bsw,
+                                  const std::vector<TableEntry>& tbl)
+        : src(bsw), table(tbl), sum(0) {}
+    uint64_t bytes_per_run() const { return src.size() / 8; }
+    std::string name() const {
+        std::ostringstream s;
+        s << "BenchmarkDecodeBasic<" << table_index_bits << ">";
+        return s.str();
+    }
+    __attribute__((noinline)) void runonce() {
+        sum = decode_basic<table_index_bits>(src.data.data(), src.size(), table.data());
+    }
+};
+
+void benchmark_decode_basic() {
+    const std::vector<std::pair<Symbol, uint8_t>> example_canonical_codes = {
+        {127, 2}, {128, 2}, {126, 3}, {129, 3}, {130, 3}, {125, 5}, {131, 5},
+        {124, 6}, {132, 6}, {123, 7}, {133, 7}, {122, 8}, {134, 8}};
+    const size_t n_symbols = 10 * 1024 * 1024;  // 10 * 1024 * 1024;
+    constexpr uint32_t table_index_bits = 8;
+
+    // Build a decoding table
+    std::vector<TableEntry> table(1u << table_index_bits, {0, 0});
+    uint32_t code = 0;
+    uint8_t code_length = 0;
+    for (const auto& [symbol, length] : example_canonical_codes) {
+        while (length > code_length) {
+            code <<= 1;
+            code_length++;
+        }
+        uint32_t entry_count = 1u << (table_index_bits - length);
+        for (uint32_t i = 0; i < entry_count; ++i) {
+            uint32_t index = (code << (table_index_bits - length)) + i;
+            table[reverse_bits(index, table_index_bits)] = {symbol, length};
+        }
+        code++;
+    }
+
+    // Generate data (sampling from the table is like sampling from the codes)
+    BitStreamWriter<uint32_t> bsw;
+    std::default_random_engine rng(12345);
+    std::uniform_int_distribution<size_t> dist(0, table.size() - 1);
+    std::vector<Symbol> symbols;
+    while (symbols.size() < n_symbols) {
+        auto index = dist(rng);
+        auto entry = table[index];
+        if (entry.n_bits == 0) continue;
+        bsw.write_bits(index, entry.n_bits);
+        symbols.push_back(static_cast<Symbol>(entry.value));
+    }
+
+    auto sum = decode_basic<table_index_bits>(bsw.data.data(), bsw.size(), table.data());
+    uint32_t expected_sum = 0;
+    for (const auto& s : symbols) {
+        expected_sum += s;
+    }
+    std::cerr << "Decoded sum: " << sum << ", expected sum: " << expected_sum << "\n";
+    assert(sum == expected_sum);
+
+    BenchmarkDecodeBasic<table_index_bits> benchmark(bsw, table);
+    auto measurement = run_benchmark(benchmark, 50, /*pre_runs*/ 5);
+    std::cerr << benchmark.name() << " :: " << measurement << "B/s" << std::endl;
+}
+
 int main() {
-    omp_set_num_threads(omp_get_max_threads());
-    // omp_set_num_threads(1);
+    // omp_set_num_threads(omp_get_max_threads());
+    omp_set_num_threads(1);
 
     std::cerr << "[huffman.cpp] running on " << omp_get_max_threads() << " threads" << std::endl;
     auto start = std::chrono::high_resolution_clock::now();
 
-    test_huffman_codes();
+    // test_huffman_codes();
+    // test_decode_basic();
+    benchmark_decode_basic();
 
     std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
     std::cerr << "[huffman.cpp] finished in " << elapsed.count() << " seconds" << std::endl;
