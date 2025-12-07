@@ -9,17 +9,14 @@ rule compile
   command = $cxx $flags -o $out $in
 rule compile_asm
   command = $cxx $flags -S -o $out $in
-rule runpy
-  command = python $in $args > $out
 rule run
   command = $in $args
 
 # Targets
-build $builddir/hist.bin: runpy generate_hist.py
-build $builddir/huffman: compile src/huffman.cpp
-build $builddir/huffman.s: compile_asm src/huffman.cpp
+build $builddir/encodings: compile src/encodings.cpp
+build $builddir/encodings.s: compile_asm src/encodings.cpp
 build $builddir/benchmarks: compile src/benchmarks.cpp
 build $builddir/benchmarks.s: compile_asm src/benchmarks.cpp
 
-build run: run $builddir/huffman | $builddir/hist.bin
+build run: run $builddir/encodings
 default run

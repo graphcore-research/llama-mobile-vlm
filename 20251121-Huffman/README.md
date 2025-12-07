@@ -6,6 +6,7 @@ Commands:
 
 ```sh
 ninja
-ninja run
-ninja build/huffman.s
+ninja build/encodings && ./build/encodings
+ninja build/benchmarks && ./build/benchmarks
+ninja build/encodings.s
 ```
