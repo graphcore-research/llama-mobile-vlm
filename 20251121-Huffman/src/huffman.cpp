@@ -51,6 +51,16 @@ uint log2_ceil(uint64_t n) {
     return l;
 }
 
+uint32_t reverse_bits(uint32_t bits, uint8_t n_bits) {
+    uint32_t reversed = 0;
+    for (uint8_t i = 0; i < n_bits; ++i) {
+        reversed <<= 1;
+        reversed |= (bits & 1);
+        bits >>= 1;
+    }
+    return reversed;
+}
+
 Codebook generate_huffman_codes(const std::shared_ptr<Node>& root) {
     Codebook codes;
     std::function<void(const std::shared_ptr<Node>&, uint64_t, uint8_t)> traverse;
@@ -116,6 +126,49 @@ void show_codes(const Histogram& hist, const Codebook& codes, uint max_length) {
     }
     std::cout << "Average bits per symbol: " << bits_per_symbol(hist, codes) << " (usage "
               << code_space_usage(codes) << ")" << "\n";
+}
+
+// -------------------------------------------------------------------------------------------------
+// Data generation
+
+std::vector<double> generate_student_t(size_t n, double df, uint64_t seed = 42) {
+    std::default_random_engine rng(seed);
+    std::student_t_distribution<double> dist(df);
+    std::vector<double> data(n);
+    for (size_t i = 0; i < n; ++i) {
+        data[i] = dist(rng);
+    }
+    return data;
+}
+
+std::vector<Symbol> quantise(const std::vector<double>& data, double delta) {
+    std::vector<Symbol> symbols;
+    symbols.reserve(data.size());
+    for (const auto& v : data) {
+        int q = std::clamp(static_cast<int>(std::round(v / delta)) + 128, 0, 255);
+        symbols.push_back(static_cast<Symbol>(q));
+    }
+    return symbols;
+}
+
+Histogram count_histogram(const std::vector<Symbol>& symbols, size_t n_symbols = 256) {
+    Histogram hist(n_symbols, 0);
+    for (const auto& s : symbols) {
+        hist[s]++;
+    }
+    return hist;
+}
+
+double calculate_entropy(const Histogram& hist) {
+    uint64_t total = std::accumulate(hist.begin(), hist.end(), 0ull);
+    double entropy = 0.0;
+    for (const auto& freq : hist) {
+        if (freq > 0) {
+            double p = static_cast<double>(freq) / static_cast<double>(total);
+            entropy -= p * std::log2(p);
+        }
+    }
+    return entropy;
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -432,16 +485,6 @@ void test_decode_basic() {
     assert(sum == (10 + 20 + 30 + 40) * 10);
 }
 
-uint32_t reverse_bits(uint32_t bits, uint8_t n_bits) {
-    uint32_t reversed = 0;
-    for (uint8_t i = 0; i < n_bits; ++i) {
-        reversed <<= 1;
-        reversed |= (bits & 1);
-        bits >>= 1;
-    }
-    return reversed;
-}
-
 template <uint32_t table_index_bits>
 struct BenchmarkDecodeBasic {
     BitStreamWriter<uint32_t> src;
@@ -512,18 +555,40 @@ void benchmark_decode_basic() {
     std::cerr << benchmark.name() << " :: " << measurement << "B/s" << std::endl;
 }
 
+void test_new_data() {
+    // dof=3, delta=0.745
+    // dof=5, delta=0.645
+    // dof=7, delta=0.605
+    // dof=100, delta=0.525
+    auto data = generate_student_t(1 << 20, /*dof*/ 100.0);
+    auto symbols = quantise(data, /*delta*/ 0.525);
+    auto hist = count_histogram(symbols);
+    double entropy = calculate_entropy(hist);
+
+    std::cerr << "[huffman::test_new_data] Data entropy: " << entropy << " bits/symbol"
+              << std::endl;
+
+    auto codes0 = generate_huffman_codes(build_huffman_tree(hist));
+    show_codes(hist, codes0, /*max_length*/ 8);
+
+    auto codes = build_codes_fallback(hist, 8);
+    show_codes(hist, codes, /*max_length*/ 8);
+}
+
 int main() {
     // omp_set_num_threads(omp_get_max_threads());
     omp_set_num_threads(1);
 
-    std::cerr << "[huffman.cpp] running on " << omp_get_max_threads() << " threads" << std::endl;
+    std::cerr << "[huffman] running on " << omp_get_max_threads() << " threads" << std::endl;
     auto start = std::chrono::high_resolution_clock::now();
 
     // test_huffman_codes();
     // test_decode_basic();
-    benchmark_decode_basic();
+    // benchmark_decode_basic();
+
+    test_new_data();
 
     std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
-    std::cerr << "[huffman.cpp] finished in " << elapsed.count() << " seconds" << std::endl;
+    std::cerr << "[huffman] finished in " << elapsed.count() << " seconds" << std::endl;
     return 0;
 }
