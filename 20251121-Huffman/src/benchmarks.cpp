@@ -1,4 +1,8 @@
-#include "common.hpp"
+#include "benchmarking.hpp"
+
+#include <arm_neon.h>
+#include <cassert>
+#include <random>
 
 template <class Element>
 struct BenchmarkMemcpy {

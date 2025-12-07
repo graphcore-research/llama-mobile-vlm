@@ -1,7 +1,10 @@
-#include "common.hpp"
+#include "benchmarking.hpp"
 
+#include <arm_neon.h>
 #include <bitset>
+#include <cassert>
 #include <fstream>
+#include <random>
 
 // -------------------------------------------------------------------------------------------------
 // Basic types

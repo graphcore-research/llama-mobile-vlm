@@ -1,17 +1,13 @@
 #pragma once
 
-#include <cassert>
+#include <omp.h>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
-#include <random>
 #include <string>
 #include <vector>
-
-#include <arm_neon.h>
-#include <omp.h>
 
 // `byte` is a uint8, which does not have the aliasing rules issues of std::byte or uint8_t
 enum class byte : uint8_t {};
@@ -83,6 +79,9 @@ inline std::ostream& operator<<(std::ostream& out, const Measurement& m) {
     return out << mean / divisor << " ± " << error / divisor << units;
 }
 
+// Run a benchmark, which must provide:
+//   size_t bytes_per_run() const;
+//   void runonce();
 template <class Benchmark>
 Measurement run_benchmark(Benchmark&& benchmark, uint runs, uint pre_runs) {
     std::vector<double> results;
