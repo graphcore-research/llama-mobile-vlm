@@ -5,7 +5,7 @@ Vibe-coded examples for Huffman, tANS, and Arithmetic coding.
 import heapq
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import torch
 from torch import Tensor
@@ -282,17 +282,12 @@ class TansEncoder:
     def encode(self, symbols: List[int]) -> Tuple[List[int], int]:
         x = self.L
         bits = []
-
         for s in reversed(symbols):
-            if s not in self.freqs:
-                raise ValueError(f"Symbol {s} not in frequency table")
             L_s = self.freqs[s]
             while x >= 2 * L_s:
                 bits.append(x & 1)
                 x >>= 1
-
-            idx = x - L_s
-            x = self.encode_table[s][idx]
+            x = self.encode_table[s][x - L_s]
 
         return bits, x
 
@@ -302,26 +297,20 @@ class TansDecoder:
         self.decode_table = decode_table
         self.L = L
 
-    def decode(self, bits: List[int], start_state: int, num_symbols: int) -> List[int]:
+    def decode(
+        self, bits: List[int], start_state: int, num_symbols: int
+    ) -> Iterable[int]:
         x = start_state
-        symbols = []
         bit_stack = list(bits)
-
         for _ in range(num_symbols):
             entry = self.decode_table[x - self.L]
-            symbols.append(entry.symbol)
+            yield entry.symbol
 
-            nb_bits = entry.nb_bits
             read_val = 0
-            for _ in range(nb_bits):
-                if not bit_stack:
-                    raise ValueError("Not enough bits")
-                bit = bit_stack.pop()
-                read_val = (read_val << 1) | bit
+            for _ in range(entry.nb_bits):
+                read_val = (read_val << 1) | bit_stack.pop()
 
             x = entry.new_x + read_val
-
-        return symbols
 
 
 ###########################################################################
@@ -497,7 +486,7 @@ def test_tans() -> None:
         test_sequence.extend([s] * 5)
 
     bits, final_state = encoder.encode(test_sequence)
-    decoded_symbols = decoder.decode(bits, final_state, len(test_sequence))
+    decoded_symbols = list(decoder.decode(bits, final_state, len(test_sequence)))
 
     print(f"tANS Input length: {len(test_sequence)}")
     print(f"tANS Output bits: {len(bits)}")
