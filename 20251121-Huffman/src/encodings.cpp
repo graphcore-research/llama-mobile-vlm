@@ -237,47 +237,65 @@ std::vector<SymbolWithLength> build_decoding_table(const CanonicalCodebook& code
 }
 
 /*
- * Write an LSB-first bitstream. E.g. with uint8_t
+ * Write a bitstream with configurable word fill direction. Default is LSB-first (bits fill up
+ * from the least-significant bit). With Mode::Msb bits fill down from the most-significant bit.
+ *
+ * Example (uint8_t, Mode::Lsb):
  *                              data[0]   data[1]
  *  write_bits(0b101, 3)   -> 0000'0101
  *  write_bits(0b11, 2)    -> 0001'1101
  *  write_bits(0b10011, 5) -> 0111'1101 0000'0010
  */
 template <class T>
-struct LsbBitStreamWriter {
+struct BitStreamWriter {
     using Element = T;
+    enum class Mode { Lsb, Msb };
     constexpr static uint8_t T_bits = sizeof(T) * 8;
+
     std::vector<T> data;
     uint8_t bits_filled;
+    Mode mode;
 
-    LsbBitStreamWriter() : bits_filled(0) { data.push_back(0); }
+    explicit BitStreamWriter(Mode mode = Mode::Lsb) : bits_filled(0), mode(mode) {
+        data.push_back(0);
+    }
 
     size_t size_bits() const { return (data.size() - 1) * T_bits + bits_filled; }
     size_t size_bytes() const { return data.size() * sizeof(T); }
 
     void write_bits(T bits, uint8_t n_bits) {
-        bits &= ~T(0) >> (sizeof(T) * 8 - n_bits);
-        auto to_write = std::min<uint8_t>(n_bits, T_bits - bits_filled);
-        data.back() |= (bits << bits_filled);
-        bits_filled += to_write;
-        if (bits_filled == T_bits) {
-            data.push_back(0);
-            bits_filled = 0;
-        }
-        // write any remaining bits
-        bits >>= to_write;
-        n_bits -= to_write;
-        if (n_bits > 0) {
-            write_bits(bits, n_bits);
+        auto lower_mask = [](uint8_t count) -> T { return ~T(0) >> (T_bits - count); };
+
+        bits &= lower_mask(n_bits);
+        while (n_bits) {
+            const auto available = static_cast<uint8_t>(T_bits - bits_filled);
+            const auto to_write = std::min<uint8_t>(n_bits, available);
+            const auto shift = (mode == Mode::Lsb) ? bits_filled : (available - to_write);
+            data.back() |= (bits & lower_mask(to_write)) << shift;
+            bits_filled += to_write;
+            if (bits_filled == T_bits) {
+                data.push_back(0);
+                bits_filled = 0;
+            }
+            bits >>= to_write;
+            n_bits -= to_write;
         }
     }
 };
 
-std::ostream& operator<<(std::ostream& out, const LsbBitStreamWriter<uint32_t>& bsw) {
+template <class T>
+std::ostream& operator<<(std::ostream& out, const BitStreamWriter<T>& bsw) {
+    using BSW = BitStreamWriter<T>;
     for (auto i = 0u; i < bsw.data.size(); ++i) {
-        auto n_bits = (i + 1 == bsw.data.size()) ? bsw.bits_filled : 32u;
-        for (auto j = 0u; j < n_bits; ++j) {
-            out << ((bsw.data[i] >> j) & 1);
+        auto n_bits = (i + 1 == bsw.data.size()) ? bsw.bits_filled : BSW::T_bits;
+        if (bsw.mode == BSW::Mode::Lsb) {
+            for (auto j = 0u; j < n_bits; ++j) {
+                out << ((bsw.data[i] >> j) & 1);
+            }
+        } else {
+            for (auto j = 0u; j < n_bits; ++j) {
+                out << ((bsw.data[i] >> (BSW::T_bits - 1 - j)) & 1);
+            }
         }
     }
     return out;
@@ -328,7 +346,7 @@ struct Impl : Transcoder {
           decoding_table(build_decoding_table(codebook, table_index_bits)) {}
 
     std::vector<char> encode(const std::vector<Symbol>& data) const override {
-        LsbBitStreamWriter<uint32_t> bsw;
+        BitStreamWriter<uint32_t> bsw;
         for (const auto& s : data) {
             auto code = encoding_table[s];
             assert(code.has_value());
