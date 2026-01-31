@@ -8,14 +8,15 @@
 // -------------------------------------------------------------------------------------------------
 // Basic types
 
-using Symbol = uint8_t;
+using Symbol = int8_t;
 using Histogram = std::vector<uint64_t>;
 
+constexpr int32_t MinSymbol = std::numeric_limits<Symbol>::min();
 constexpr size_t NSymbols = 1 << (8 * sizeof(Symbol));
 
 struct Transcoder {
     virtual std::vector<char> encode(const std::vector<Symbol>& data) const = 0;
-    virtual uint32_t decode_sum(const char* data) const = 0;
+    virtual int32_t decode_sum(const char* data) const = 0;
 
     virtual ~Transcoder() = default;
 };
@@ -43,7 +44,7 @@ std::vector<Symbol> quantise(const std::vector<double>& data, double delta) {
     std::vector<Symbol> symbols;
     symbols.reserve(data.size());
     for (const auto& v : data) {
-        int q = std::clamp(static_cast<int>(std::round(v / delta)) + 128, 0, 255);
+        int q = std::clamp(static_cast<int>(std::round(v / delta)), -128, 127);
         symbols.push_back(static_cast<Symbol>(q));
     }
     return symbols;
@@ -52,7 +53,7 @@ std::vector<Symbol> quantise(const std::vector<double>& data, double delta) {
 Histogram count_histogram(const std::vector<Symbol>& symbols) {
     Histogram hist(NSymbols, 0);
     for (const auto& s : symbols) {
-        hist[s]++;
+        hist[static_cast<int>(s) - MinSymbol]++;
     }
     return hist;
 }
@@ -87,7 +88,28 @@ struct SymbolWithLength {
     uint8_t length;
 };
 
+struct EncodingTable {
+    std::vector<std::optional<Code>> table;
+
+    const Code& operator[](Symbol s) const {
+        auto index = s - MinSymbol;
+        if (!table[index].has_value()) {
+            std::ostringstream oss;
+            oss << "Symbol " << static_cast<int>(s) << " not in encoding table";
+            throw std::runtime_error(oss.str());
+        }
+        return table[index].value();
+    }
+};
+
 using CanonicalCodebook = std::vector<SymbolWithLength>;
+
+std::ostream& operator<<(std::ostream& out, const Code& code) {
+    for (int i = code.length - 1; i >= 0; --i) {
+        out << ((code.value >> i) & 1);
+    }
+    return out;
+}
 
 bool operator<(const SymbolWithLength& a, const SymbolWithLength& b) {
     if (a.length != b.length) return a.length < b.length;
@@ -102,7 +124,7 @@ void dump(const CanonicalCodebook& codebook) {
             std::cerr << "length: " << static_cast<uint>(group_length) << " (" << group.size()
                       << " symbols): ";
             for (const auto& s : group) {
-                std::cerr << static_cast<uint>(s) << " ";
+                std::cerr << static_cast<int>(s) << " ";
             }
             std::cerr << std::endl;
             group.clear();
@@ -116,6 +138,15 @@ void dump(const CanonicalCodebook& codebook) {
         group.push_back(entry.symbol);
     }
     flush_group();
+}
+
+void dump(const EncodingTable& table) {
+    for (auto i = 0u; i < table.table.size(); ++i) {
+        if (table.table[i].has_value()) {
+            std::cerr << (static_cast<int>(i) + MinSymbol) << " -> " << *table.table[i]
+                      << std::endl;
+        }
+    }
 }
 
 struct Node {
@@ -137,7 +168,7 @@ CanonicalCodebook build_huffman_limited(const Histogram& hist, uint max_depth) {
     std::vector<std::shared_ptr<Node>> leaves;
     for (auto i = 0u; i < hist.size(); ++i) {
         if (hist[i] > 0) {
-            leaves.push_back(std::make_shared<Node>(static_cast<Symbol>(i), hist[i]));
+            leaves.push_back(std::make_shared<Node>(static_cast<Symbol>(i + MinSymbol), hist[i]));
         }
     }
     if (leaves.empty()) return {};
@@ -167,7 +198,7 @@ CanonicalCodebook build_huffman_limited(const Histogram& hist, uint max_depth) {
     std::function<void(const std::shared_ptr<Node>&)> traverse;
     traverse = [&](const std::shared_ptr<Node>& item) {
         if (item->symbol) {
-            lengths[item->symbol.value()]++;
+            lengths[item->symbol.value() - MinSymbol]++;
         } else {
             if (item->left) traverse(item->left);
             if (item->right) traverse(item->right);
@@ -182,7 +213,7 @@ CanonicalCodebook build_huffman_limited(const Histogram& hist, uint max_depth) {
     CanonicalCodebook codebook;
     for (size_t i = 0; i < lengths.size(); ++i) {
         if (lengths[i] > 0) {
-            codebook.push_back({static_cast<Symbol>(i), lengths[i]});
+            codebook.push_back({static_cast<Symbol>(i + MinSymbol), lengths[i]});
         }
     }
     std::sort(codebook.begin(), codebook.end());
@@ -200,19 +231,6 @@ T reverse_bits(T bits, uint8_t n_bits) {
     return reversed;
 }
 
-struct EncodingTable {
-    std::vector<std::optional<Code>> table;
-
-    const Code& operator[](Symbol s) const {
-        if (!table[s].has_value()) {
-            std::ostringstream oss;
-            oss << "Symbol " << static_cast<uint>(s) << " not in encoding table";
-            throw std::runtime_error(oss.str());
-        }
-        return table[s].value();
-    }
-};
-
 EncodingTable build_encoding_table(const CanonicalCodebook& codebook) {
     std::vector<std::optional<Code>> table;
     table.resize(NSymbols, std::nullopt);
@@ -223,7 +241,7 @@ EncodingTable build_encoding_table(const CanonicalCodebook& codebook) {
             code <<= 1;
             code_length++;
         }
-        table[symbol] = {reverse_bits(code, length), length};
+        table[symbol - MinSymbol] = {reverse_bits(code, length), length};
         code++;
     }
     return {std::move(table)};
@@ -249,6 +267,11 @@ std::vector<SymbolWithLength> build_decoding_table(const CanonicalCodebook& code
     return table;
 }
 
+// -------------------------------------------------------------------------------------------------
+// Writers & readers
+
+enum class BitStreamMode { Lsb, Msb };
+
 /*
  * Write a bitstream with configurable word fill direction. Default is LSB-first (bits fill up
  * from the least-significant bit). With Mode::Msb bits fill down from the most-significant bit.
@@ -259,51 +282,56 @@ std::vector<SymbolWithLength> build_decoding_table(const CanonicalCodebook& code
  *  write_bits(0b11, 2)    -> 0001'1101
  *  write_bits(0b10011, 5) -> 0111'1101 0000'0010
  */
-template <class T>
+template <class T, BitStreamMode _Mode = BitStreamMode::Lsb>
 struct BitStreamWriter {
     using Element = T;
-    enum class Mode { Lsb, Msb };
+    constexpr static BitStreamMode Mode = _Mode;
     constexpr static uint8_t T_bits = sizeof(T) * 8;
 
     std::vector<T> data;
     uint8_t bits_filled;
-    Mode mode;
 
-    explicit BitStreamWriter(Mode mode = Mode::Lsb) : bits_filled(0), mode(mode) {
-        data.push_back(0);
-    }
+    BitStreamWriter() : bits_filled(0) { data.push_back(0); }
 
     size_t size_bits() const { return (data.size() - 1) * T_bits + bits_filled; }
     size_t size_bytes() const { return data.size() * sizeof(T); }
 
     void write_bits(T bits, uint8_t n_bits) {
-        auto lower_mask = [](uint8_t count) -> T { return ~T(0) >> (T_bits - count); };
-
-        bits &= lower_mask(n_bits);
+        auto lower_mask = [](uint8_t count) -> T { return (T(1) << count) - 1; };
+        auto upper_mask = [&](uint8_t count) -> T {
+            return ((T(1) << count) - 1) << (n_bits - count);
+        };
         while (n_bits) {
             const auto available = static_cast<uint8_t>(T_bits - bits_filled);
             const auto to_write = std::min<uint8_t>(n_bits, available);
-            const auto shift = (mode == Mode::Lsb) ? bits_filled : (available - to_write);
-            data.back() |= (bits & lower_mask(to_write)) << shift;
+            if (Mode == BitStreamMode::Lsb) {
+                data.back() |= (bits & lower_mask(to_write)) << bits_filled;
+                bits >>= to_write;
+            } else {
+                if (n_bits < available) {
+                    data.back() |= (bits & upper_mask(to_write)) << (available - n_bits);
+                } else {
+                    data.back() |= (bits & upper_mask(to_write)) >> (n_bits - available);
+                }
+            }
+            n_bits -= to_write;
             bits_filled += to_write;
             if (bits_filled == T_bits) {
                 data.push_back(0);
                 bits_filled = 0;
             }
-            bits >>= to_write;
-            n_bits -= to_write;
         }
     }
 
     void write_bits(const Code& code) { write_bits(code.value, code.length); }
 };
 
-template <class T>
-std::ostream& operator<<(std::ostream& out, const BitStreamWriter<T>& bsw) {
-    using BSW = BitStreamWriter<T>;
+template <class T, BitStreamMode Mode>
+std::ostream& operator<<(std::ostream& out, const BitStreamWriter<T, Mode>& bsw) {
+    using BSW = std::remove_reference_t<decltype(bsw)>;
     for (auto i = 0u; i < bsw.data.size(); ++i) {
         auto n_bits = (i + 1 == bsw.data.size()) ? bsw.bits_filled : BSW::T_bits;
-        if (bsw.mode == BSW::Mode::Lsb) {
+        if (Mode == BitStreamMode::Lsb) {
             for (auto j = 0u; j < n_bits; ++j) {
                 out << ((bsw.data[i] >> j) & 1);
             }
@@ -316,8 +344,9 @@ std::ostream& operator<<(std::ostream& out, const BitStreamWriter<T>& bsw) {
     return out;
 }
 
-template <class T, class TBuffer>
-struct LsbBitStreamReader {
+template <class T, class TBuffer, BitStreamMode Mode = BitStreamMode::Lsb>
+struct BitStreamReader {
+    constexpr static uint8_t TBuffer_bits = sizeof(TBuffer) * 8;
     constexpr static uint32_t T_bits = sizeof(T) * 8;
     static_assert(sizeof(TBuffer) > sizeof(T), "TBuffer must be wider than T to avoid overflow");
 
@@ -325,19 +354,28 @@ struct LsbBitStreamReader {
     TBuffer buffer;
     uint32_t buffer_bits;
 
-    LsbBitStreamReader() : data(nullptr), buffer(0), buffer_bits(0) {}
-    explicit LsbBitStreamReader(const T* data) : data(data), buffer(0), buffer_bits(0) {}
+    BitStreamReader() : data(nullptr), buffer(0), buffer_bits(0) {}
+    explicit BitStreamReader(const T* data) : data(data), buffer(0), buffer_bits(0) {}
 
     TBuffer& read(uint8_t min_bits) {
         if (buffer_bits < min_bits) {
-            buffer |= static_cast<TBuffer>(*data++) << buffer_bits;
+            auto next = static_cast<TBuffer>(*data++);
+            if constexpr (Mode == BitStreamMode::Lsb) {
+                buffer |= next << buffer_bits;
+            } else {
+                buffer |= next << (TBuffer_bits - T_bits - buffer_bits);
+            }
             buffer_bits += T_bits;
         }
         return buffer;
     }
 
     void advance(uint8_t n_bits) {
-        buffer >>= n_bits;
+        if constexpr (Mode == BitStreamMode::Lsb) {
+            buffer >>= n_bits;
+        } else {
+            buffer <<= n_bits;
+        }
         buffer_bits -= n_bits;
     }
 };
@@ -357,8 +395,8 @@ struct Writer {
         write(&value, 1);
     }
 
-    template <class T>
-    void write_bitstream(const BitStreamWriter<T>& bsw) {
+    template <class T, BitStreamMode Mode>
+    void write_bitstream(const BitStreamWriter<T, Mode>& bsw) {
         write(bsw.data.data(), bsw.data.size());
     }
 };
@@ -378,9 +416,9 @@ struct Reader {
         return *get<T>(byte_offset);
     }
 
-    template <class T, class TBuffer>
-    LsbBitStreamReader<T, TBuffer> read_bitstream(size_t byte_offset) {
-        return LsbBitStreamReader<T, TBuffer>(get<T>(byte_offset));
+    template <class T, class TBuffer, BitStreamMode Mode = BitStreamMode::Lsb>
+    BitStreamReader<T, TBuffer, Mode> read_bitstream(size_t byte_offset) {
+        return BitStreamReader<T, TBuffer, Mode>(get<T>(byte_offset));
     }
 };
 
@@ -396,12 +434,12 @@ struct Impl : Transcoder {
         return w.data;
     }
 
-    uint32_t decode_sum(const char* data) const override {
+    int32_t decode_sum(const char* data) const override {
         const uint64_t n_symbols = *reinterpret_cast<const uint64_t*>(data);
-        uint32_t sum = 0;
+        int32_t sum = 0;
         const Symbol* symbols = reinterpret_cast<const Symbol*>(data + sizeof(uint64_t));
 #pragma omp parallel for reduction(+ : sum)
-        for (uint64_t i = 0; i < n_symbols; ++i) {
+        for (auto i = 0u; i < n_symbols; ++i) {
             sum += symbols[i];
         }
         return sum;
@@ -439,13 +477,13 @@ struct Impl : Transcoder {
         return w.data;
     }
 
-    uint32_t decode_sum(const char* data) const override {
+    int32_t decode_sum(const char* data) const override {
         const uint32_t index_mask = (1u << table_index_bits) - 1;
         Reader reader(data);
         const auto n_symbols = reader.read<uint64_t>(0);
         auto stream = reader.read_bitstream<uint32_t, uint64_t>(sizeof(uint64_t));
-        uint32_t sum = 0;
-        for (size_t count = 0; count < n_symbols; ++count) {
+        int32_t sum = 0;
+        for (auto count = 0u; count < n_symbols; ++count) {
             auto index = stream.read(table_index_bits) & index_mask;
             auto entry = decoding_table[index];
             sum += entry.symbol;
@@ -498,19 +536,19 @@ struct Impl : Transcoder {
         return w.data;
     }
 
-    uint32_t decode_sum(const char* data) const override {
+    int32_t decode_sum(const char* data) const override {
         const uint32_t index_mask = (1u << table_index_bits) - 1;
         Reader reader(data);
 
         // Setup streams using stored offsets
-        std::array<LsbBitStreamReader<uint32_t, uint64_t>, N> streams;
+        std::array<BitStreamReader<uint32_t, uint64_t>, N> streams;
         for (size_t i = 0; i < N; ++i) {
             auto offset = reader.read<uint64_t>(sizeof(uint64_t) + i * sizeof(uint64_t));
             streams[i] = reader.read_bitstream<uint32_t, uint64_t>(offset);
         }
 
         // Decode symbols from all streams in parallel until exhausted
-        uint32_t sum = 0;
+        int32_t sum = 0;
         uint64_t remaining = reader.read<uint64_t>(0);
         while (true) {
             for (auto& stream : streams) {
@@ -531,6 +569,150 @@ std::unique_ptr<Transcoder> create(const Histogram& hist, size_t table_index_bit
 }
 
 }  // namespace huffman_limited_memory_multistream
+
+// -------------------------------------------------------------------------------------------------
+
+namespace unary_fallback {
+
+struct Impl : Transcoder {
+    static constexpr int N = 16;
+    EncodingTable encoding_table;
+
+    Impl() {
+        encoding_table.table.resize(NSymbols);
+        for (auto i = 0u; i < NSymbols; ++i) {
+            auto s = static_cast<Symbol>(i + MinSymbol);
+            if (s == 0) {
+                encoding_table.table[i] = Code{0b1, 1};
+            } else if (std::abs(s) <= 6) {
+                // [...0*abs(s), 1, signbit]
+                auto sign = s < 0 ? 1u : 0u;
+                encoding_table.table[i] = Code{0b10 | sign, static_cast<uint8_t>(std::abs(s) + 2)};
+            } else {
+                // [0000'0000, s]
+                encoding_table.table[i] = Code{static_cast<uint8_t>(s), 16};
+            }
+        }
+    }
+
+    std::vector<char> encode(const std::vector<Symbol>& data) const override {
+        assert(data.size() % N == 0 && "Data size must be multiple of N for SIMD decoding");
+        std::array<BitStreamWriter<uint32_t, BitStreamMode::Msb>, N> streams;
+        for (size_t i = 0; i < data.size(); ++i) {
+            streams[i % N].write_bits(encoding_table[data[i]]);
+        }
+        // std::cerr << "streams[ ]: ";
+        // for (size_t i = 0; i < streams[0].size_bits(); ++i) {
+        //     std::cerr << (i % 64 ? ' ' : '*');
+        // }
+        // std::cerr << std::endl;
+        // std::cerr << "streams[0]: " << streams[0] << std::endl;
+        Writer w;
+        w.write<uint64_t>(data.size());  // n_symbols
+        // N* offset
+        uint64_t offset = sizeof(uint64_t) + N * sizeof(uint64_t);
+        for (const auto& stream : streams) {
+            w.write<uint64_t>(offset);
+            offset += stream.size_bytes();
+        }
+        // N* bitstreams
+        for (const auto& stream : streams) {
+            w.write_bitstream(stream);
+        }
+        return w.data;
+    }
+
+    static std::tuple<int8x16_t, uint8x16_t> decode(uint8x16_t bits0, uint8x16_t bits1) {
+        uint8x16_t nzeros = vclzq_u8(bits0);
+        int8x16_t values = vreinterpretq_s8_u8(nzeros);
+
+        uint8x16_t signs = vtstq_u8(vshlq_u8(bits0, nzeros), vdupq_n_u8(0b0100'0000));
+        values = vbslq_s8(signs, vnegq_s8(values), values);
+
+        uint8x16_t fallback = vceqq_u8(bits0, vdupq_n_u8(0));
+        values = vbslq_s8(fallback, bits1, values);
+
+        // Could be better as a tbl lookup? (so far 8 inst, this adds +8 inst)
+        // uint8x16_t bits_to_skip = nzeros;
+        uint8x16_t is_zero = vceqq_u8(nzeros, vdupq_n_u8(0));
+        uint8x16_t n_extra_bits = vbslq_u8(is_zero, vdupq_n_u8(1), vdupq_n_u8(2));
+        uint8x16_t bits_to_skip = vaddq_u8(nzeros, n_extra_bits);
+        bits_to_skip = vbslq_u8(fallback, vdupq_n_u8(16), bits_to_skip);
+
+        return std::make_tuple(values, bits_to_skip);
+    }
+
+    int32_t decode_sum(const char* data) const override {
+        // Note: test reading with 16(32)-bit or 32(64)-bit buffers
+        // Note: try a table lookup for bits_to_read
+
+        Reader reader(data);
+        const auto n_symbols = reader.read<uint64_t>(0);
+
+        // Setup streams using stored offsets
+        std::array<BitStreamReader<uint32_t, uint64_t, BitStreamMode::Msb>, N> streams;
+        for (size_t i = 0; i < N; ++i) {
+            auto offset = reader.read<uint64_t>(sizeof(uint64_t) + i * sizeof(uint64_t));
+            streams[i] = reader.read_bitstream<uint32_t, uint64_t, BitStreamMode::Msb>(offset);
+        }
+
+        int32_t sum = 0;
+        for (auto count = 0u; count < n_symbols / N; ++count) {
+            // Sketch:
+            //  - read from 16 streams into two uint8x16_t for bits [0-7] [8-15]
+            //  - count leading zeros
+            //  - extract and apply sign
+            //  - test and copy large values from 2nd register
+            //  - compute & apply shift for original streams
+
+            uint8_t _bits0[16], _bits1[16];
+            for (int i = 0; i < N; ++i) {
+                auto value = streams[i].read(16);
+                _bits0[i] = static_cast<uint8_t>(value >> 56);
+                _bits1[i] = static_cast<uint8_t>(value >> 48);
+            }
+            for (int i = N; i < 16; ++i) {
+                _bits0[i] = 0;
+                _bits1[i] = 0;
+            }
+            uint8x16_t bits0 = vld1q_u8(_bits0);  // bits [0-7]
+            uint8x16_t bits1 = vld1q_u8(_bits1);  // bits [8-15]
+            auto d = decode(bits0, bits1);
+
+            sum += vaddlvq_s8(std::get<0>(d));
+
+            uint8_t _bits_to_advance[16];
+            vst1q_u8(_bits_to_advance, std::get<1>(d));
+            for (int i = 0; i < N; ++i) {
+                auto bits_to_advance = _bits_to_advance[i];
+                streams[i].advance(bits_to_advance);
+            }
+
+            // // Debug
+            // int8_t debug_values[N];
+            // vst1q_s8(debug_values, std::get<0>(d));
+            // std::cerr << "Decoded values: ";
+            // for (int i = 0; i < N; ++i) {
+            //     std::cerr << static_cast<int>(debug_values[i]) << " ";
+            // }
+            // std::cerr << std::endl;
+
+            // vst1q_s8(debug_values, std::get<1>(d));
+            // std::cerr << "Bits to skip: ";
+            // for (int i = 0; i < N; ++i) {
+            //     std::cerr << static_cast<int>(debug_values[i]) << " ";
+            // }
+            // std::cerr << "\n" << std::endl;
+        }
+        return sum;
+    }
+};
+
+std::unique_ptr<Transcoder> create(const Histogram&) {
+    return std::make_unique<Impl>();
+}
+
+}  // namespace unary_fallback
 
 // -------------------------------------------------------------------------------------------------
 // Driver
@@ -562,8 +744,8 @@ void evaluate_format(const Format& format,
     }
 
     // Test correctness
-    for (auto n_sub : std::initializer_list<size_t>{10, 100, symbols.size() / 3, symbols.size()}) {
-        auto expected_sum = std::accumulate(symbols.begin(), symbols.begin() + n_sub, 0ull);
+    for (auto n_sub : std::initializer_list<size_t>{16, 256, symbols.size() / 2, symbols.size()}) {
+        auto expected_sum = std::accumulate(symbols.begin(), symbols.begin() + n_sub, 0);
         auto encoded = coder->encode(std::vector<Symbol>(symbols.begin(), symbols.begin() + n_sub));
         auto decoded_sum = coder->decode_sum(encoded.data());
         if (expected_sum != decoded_sum) {
@@ -597,6 +779,7 @@ int main() {
 
     std::vector<Format> formats = {
         {"no_compression", no_compression::create},
+        {"unary_fallback", unary_fallback::create},
         {"huffman_limited_memory[8]",
          [](const Histogram& hist) {
              return huffman_limited_memory::create(hist, /*table_bits*/ 8);
