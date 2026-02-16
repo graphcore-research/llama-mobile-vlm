@@ -24,3 +24,17 @@ if __name__ == "__main__":
                 job=Job(train.run_experiment, (settings,), {}),
             )
             submit(sub)
+
+    # Additional runs added 16-02-26
+    for lr in [2**-i for i in range(16, 19)]:
+        for n_steps in [4096, 8192]:
+            settings.training.optimiser.lr = lr
+            settings.training.n_steps = n_steps
+
+            sub = Submission(
+                user="lukar",
+                project="llama-mobile",
+                env=env,
+                job=Job(train.run_experiment, (settings,), {}),
+            )
+            submit(sub)
