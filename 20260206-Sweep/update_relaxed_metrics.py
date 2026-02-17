@@ -14,7 +14,9 @@ def get_task_outputs(run: Run) -> dict[str, Any]:
     artifacts = [a for a in run.logged_artifacts() if a.type == "task_outputs"]
     assert len(artifacts) == 1, "Found none or multiple matches"
     a = artifacts[0]
-    a_dir = a.download(Path(LOCAL_DATA_PATH).parent / "artifacts")
+    a_dir = a.download(
+        Path(LOCAL_DATA_PATH).parent / f"artifacts/{run.name}/task_outputs"
+    )
     out = {}
     for path in Path(a_dir).rglob("*.jsonl"):
         with path.open() as f:
