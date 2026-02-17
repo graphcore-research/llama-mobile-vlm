@@ -56,4 +56,5 @@ for run in runs:
             "accuracy_relaxed"
         ]
 
+    print(run.summary)
     run.summary.update()
