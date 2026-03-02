@@ -1,5 +1,6 @@
 import train
 from cluster import Job, Submission, submit
+import weight_formats.quantisation as Q
 
 if __name__ == "__main__":
     settings = train.Settings.default()
@@ -29,3 +30,25 @@ if __name__ == "__main__":
                 job=Job(train.run_experiment, (settings,), {}),
             )
             submit(sub)
+
+    # Baselines
+
+    # - no QAT
+    settings.training.n_steps = 0
+    sub = Submission(
+        user="lukar",
+        project="llama-mobile",
+        env=env,
+        job=Job(train.run_experiment, (settings,), {}),
+    )
+    submit(sub)
+
+    # - bfloat16
+    settings.quantisation.fmt = Q.TorchFormat("bfloat16")
+    sub = Submission(
+        user="lukar",
+        project="llama-mobile",
+        env=env,
+        job=Job(train.run_experiment, (settings,), {}),
+    )
+    submit(sub)
