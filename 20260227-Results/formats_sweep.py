@@ -1,7 +1,8 @@
-import train
-from cluster import Job, Submission, submit
+import weight_formats.fit as F
 import weight_formats.quantisation as Q
 
+import train
+from cluster import Job, Submission, submit
 
 if __name__ == "__main__":
     settings = train.Settings.default()
@@ -35,6 +36,8 @@ if __name__ == "__main__":
             submit(sub)
 
     # Student-t
+
+    # - fixed df=30
     for n_bits, lr in zip(range(2, 5), (2**-16, 2**-17, 2**-18)):
         settings.training.optimiser.lr = lr
         for group_size in (16, 32, 64, 128):
@@ -55,5 +58,26 @@ if __name__ == "__main__":
                 env=env,
                 job=Job(train.run_experiment, (settings,), {}),
                 gpu_clique="cc914f6f-5ed5-ca2b-745b-b0b7cf09b43c.2",
+            )
+            submit(sub)
+
+    # - fit df
+    for n_bits, lr in zip(range(2, 5), (2**-16, 2**-17, 2**-18)):
+        settings.training.optimiser.lr = lr
+        for group_size in (16, 32, 64, 128):
+            settings.quantisation.fmt = F.Scaled(
+                element_bits=n_bits,
+                element_family="t",
+                scale_format=Q.parse("BFLOAT16"),
+                block_shape=(1, group_size),
+                scaling="absmax",
+            )
+
+            sub = Submission(
+                user="lukar",
+                project="llama-mobile",
+                env=env,
+                job=Job(train.run_experiment, (settings,), {}),
+                gpu_clique="e5ff6333-95b8-5c12-42b2-569be2b5eb96.1",
             )
             submit(sub)
