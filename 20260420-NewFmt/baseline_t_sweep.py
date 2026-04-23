@@ -8,8 +8,6 @@ Baseline format sweep:
 - lr = 2**(-(n_bits + 14))
     - Optimal lr for ~3bits 2**-17
     - For each extra bit, decrease learning rate x0.5
-
-Note: lr fixed at 2**-17
 """
 
 from math import log2

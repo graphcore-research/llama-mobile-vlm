@@ -1,8 +1,7 @@
 """
 Baseline format sweep:
-- INT element format, with [4, 6, 8, 12, 16] codepoints (INT2 to INT4)
-- block size [32, 64, 128]
-- absmax scaling
+- Scalar Lloyd-Max format, with [4, 6, 8, 12, 16] codepoints
+- Channel-scaling, absmax
 - Activations in INT8, channel-scaled
 - No rotations
 - lr = 2**(-(n_bits + 14))
@@ -12,6 +11,7 @@ Baseline format sweep:
 
 from math import log2
 
+import weight_formats.fit as F
 import weight_formats.quantisation as Q
 
 import train
@@ -19,7 +19,7 @@ from cluster import Job, Submission, submit
 
 if __name__ == "__main__":
     settings = train.Settings.default()
-    settings.run_name = "int-baseline-22-04-26"
+    settings.run_name = "lloyd-max-baseline-22-04-26"
     gen_path = "generation/llama-3.2-11b-vision-instruct"
     settings.data.train[0].path = f"{gen_path}/imagenet-train/new-prompts-1280k"
 
@@ -37,21 +37,23 @@ if __name__ == "__main__":
 
     for n_steps in [0, 2048]:
         settings.training.n_steps = n_steps
+        # NOTE: n_bits = 8 / 3 gives 6.35 codepoints, which is rounded to 6
         for n_points in [4, 6, 8, 12, 16]:
             n_bits = log2(n_points)
             settings.training.optimiser.lr = 2 ** (-(n_bits + 14))
-            for group_size in [32, 64, 128]:
-                settings.quantisation.fmt = Q.LinearScalingFormat(
-                    Q.IntFormat(n_bits),
-                    scale_format=Q.BFLOAT16,
-                    block_shape=(1, group_size),
-                    scaling="absmax",
-                )
-                sub = Submission(
-                    user="lukar",
-                    project="llama-mobile",
-                    env=env,
-                    job=Job(train.run_experiment, (settings,), {}),
-                    priority="high",
-                )
-                submit(sub)
+            settings.quantisation.fmt = F.Scaled(
+                n_bits,
+                "lloyd_max",
+                scale_format=Q.BFLOAT16,
+                block_shape=(1, None),
+                scaling="absmax",
+                args=dict(threshold=1e-3),
+            )
+            sub = Submission(
+                user="lukar",
+                project="llama-mobile",
+                env=env,
+                job=Job(train.run_experiment, (settings,), {}),
+                priority="high",
+            )
+            submit(sub)
