@@ -32,27 +32,28 @@ if __name__ == "__main__":
             k, v = line.strip().split("=")
             env[k] = v
 
-    settings.training.n_steps = 2048
     settings.save_checkpoint = False
 
     settings.training.rotate_text_residual = False
     settings.quantisation.activation_fmt = train.FMT_CHANNEL_INT8
 
-    for n_points in [4, 6, 8, 12, 16]:
-        n_bits = log2(n_points)
-        settings.training.optimiser.lr = 2 ** (-(n_bits + 14))
-        for group_size in [32, 64, 128]:
-            settings.quantisation.fmt = Q.LinearScalingFormat(
-                Q.IntFormat(n_bits),
-                scale_format=Q.BFLOAT16,
-                block_shape=(1, group_size),
-                scaling="absmax",
-            )
-            sub = Submission(
-                user="lukar",
-                project="llama-mobile",
-                env=env,
-                job=Job(train.run_experiment, (settings,), {}),
-                priority="high",
-            )
-            submit(sub)
+    for n_steps in [0, 2048]:
+        settings.training.n_steps = n_steps
+        for n_points in [4, 6, 8, 12, 16]:
+            n_bits = log2(n_points)
+            settings.training.optimiser.lr = 2 ** (-(n_bits + 14))
+            for group_size in [32, 64, 128]:
+                settings.quantisation.fmt = Q.LinearScalingFormat(
+                    Q.IntFormat(n_bits),
+                    scale_format=Q.BFLOAT16,
+                    block_shape=(1, group_size),
+                    scaling="absmax",
+                )
+                sub = Submission(
+                    user="lukar",
+                    project="llama-mobile",
+                    env=env,
+                    job=Job(train.run_experiment, (settings,), {}),
+                    priority="high",
+                )
+                submit(sub)

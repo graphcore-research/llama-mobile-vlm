@@ -69,15 +69,16 @@ if __name__ == "__main__":
                 )
                 submit(sub)
 
-    # Run 4k steps
-    settings.training.n_steps = 2048
+    # Run 0 steps + 4k steps
     settings.training.rotate_text_residual = False
     settings.quantisation.activation_fmt = train.FMT_CHANNEL_INT8
-    sub = Submission(
-        user="lukar",
-        project="llama-mobile",
-        env=env,
-        job=Job(train.run_experiment, (settings,), {}),
-        priority="high",
-    )
-    submit(sub)
+    for n_steps in [0, 4096]:
+        settings.training.n_steps = n_steps
+        sub = Submission(
+            user="lukar",
+            project="llama-mobile",
+            env=env,
+            job=Job(train.run_experiment, (settings,), {}),
+            priority="high",
+        )
+        submit(sub)
