@@ -48,32 +48,45 @@ if __name__ == "__main__":
             submit(sub)
 
     # Fix R + A, exclude projection/ViT params
-    settings.training.rotate_text_residual = True
     settings.quantisation.activation_fmt = train.FMT_CHANNEL_INT8
-    for exclude_proj in [False, True]:
-        for exclude_vit in [False, True]:
-            overrides = {}
-            if exclude_proj:
-                overrides["language_model.lm_head"] = train.FMT_CHANNEL_INT8
-            if exclude_vit:
-                overrides["vision_model"] = train.FMT_CHANNEL_INT8
-                overrides["multi_modal_projector"] = train.FMT_CHANNEL_INT8
-            if overrides:
-                settings.quantisation.overrides = overrides
-                sub = Submission(
-                    user="lukar",
-                    project="llama-mobile",
-                    env=env,
-                    job=Job(train.run_experiment, (settings,), {}),
-                    priority="high",
-                )
-                submit(sub)
+    for rotate in [False, True]:
+        settings.training.rotate_text_residual = rotate
+        for exclude_proj in [False, True]:
+            for exclude_vit in [False, True]:
+                overrides = {}
+                if exclude_proj:
+                    overrides["language_model.lm_head"] = train.FMT_CHANNEL_INT8
+                if exclude_vit:
+                    overrides["vision_model"] = train.FMT_CHANNEL_INT8
+                    overrides["multi_modal_projector"] = train.FMT_CHANNEL_INT8
+                if overrides:
+                    settings.quantisation.overrides = overrides
+                    sub = Submission(
+                        user="lukar",
+                        project="llama-mobile",
+                        env=env,
+                        job=Job(train.run_experiment, (settings,), {}),
+                        priority="high",
+                    )
+                    submit(sub)
 
-    # Run 0 steps + 4k steps
+    # Run 4k steps
     settings.training.rotate_text_residual = False
     settings.quantisation.activation_fmt = train.FMT_CHANNEL_INT8
-    for n_steps in [0, 4096]:
-        settings.training.n_steps = n_steps
+    settings.training.n_steps = 4096
+    sub = Submission(
+        user="lukar",
+        project="llama-mobile",
+        env=env,
+        job=Job(train.run_experiment, (settings,), {}),
+        priority="high",
+    )
+    submit(sub)
+
+    # Run 0 steps, rotations ON/OFF
+    settings.training.n_steps = 0
+    for rotate in [False, True]:
+        settings.training.rotate_text_residual = rotate
         sub = Submission(
             user="lukar",
             project="llama-mobile",
