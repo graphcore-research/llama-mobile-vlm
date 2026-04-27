@@ -1,7 +1,7 @@
 """
 Compare fixed prompt ("Describe the image") and prompt sampling
 - Fix format: INT3 + 64-block scaling + INT8, channel-scaled activations
-- Vary number steps: [256, 512, 1024, 2048]
+- Vary number steps: [256, 512, 1024, 2048, 4096, 6144, 8192]
 """
 
 import weight_formats.quantisation as Q
@@ -35,7 +35,7 @@ if __name__ == "__main__":
 
     for data_name in ["new-prompts-1280k", "single-prompt-1280k"]:
         settings.data.train[0].path = f"{train_data_path}/{data_name}"
-        for n_steps in [256, 512, 1024, 2048]:
+        for n_steps in [256, 512, 1024, 2048, 4096, 6144, 8192]:
             settings.training.n_steps = n_steps
             sub = Submission(
                 user="lukar",
