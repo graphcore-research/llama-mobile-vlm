@@ -41,3 +41,17 @@ if __name__ == "__main__":
             priority="high",
         )
         submit(sub)
+
+    # Additional runs for the old sweep without activation quantisation
+    settings.run_name = "lr-sweep-17-03-26"
+    settings.quantisation.activation_fmt = None
+    for lr_exp in [-19, -15]:
+        settings.training.optimiser.lr = 2**lr_exp
+        sub = Submission(
+            user="lukar",
+            project="llama-mobile",
+            env=env,
+            job=Job(train.run_experiment, (settings,), {}),
+            priority="high",
+        )
+        submit(sub)
