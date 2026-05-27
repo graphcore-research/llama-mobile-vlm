@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>S3D8 Decode</title>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --fg: #151515;
+      --muted: #666;
+      --line: #ccc;
+      --fill: #fff;
+      --hot: #fff3bf;
+      --index: #dbeafe;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--fg);
+      background: var(--bg);
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 24px auto;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      font-weight: 650;
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: max-content minmax(420px, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .panel {
+      width: max-content;
+      max-width: 100%;
+      border: 1px solid var(--line);
+      background: var(--fill);
+      padding: 14px;
+    }
+
+    .panel.lookup {
+      outline: 3px solid #777;
+      outline-offset: 4px;
+    }
+
+    .payload {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .box {
+      position: relative;
+      min-width: 72px;
+      height: 58px;
+      padding: 22px 10px 8px;
+      border: 1px solid var(--line);
+      background: var(--fill);
+      text-align: center;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 15px;
+    }
+
+    .wide { min-width: 146px; }
+    .bits {
+      position: absolute;
+      top: 5px;
+      left: 7px;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-size: 11px;
+      line-height: 1;
+    }
+
+    .hot { background: var(--hot); border-color: #d6a400; }
+    .payload-masked {
+      opacity: 0.35;
+      background: #eee;
+    }
+    .pos { color: #166534; }
+    .neg { color: #991b1b; }
+
+    .label {
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .expr {
+      margin: 0 0 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 15px;
+    }
+
+    .op-viz {
+      width: max-content;
+      margin: 0 0 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+
+    .op-row,
+    .op-under {
+      display: grid;
+      grid-template-columns: 72px 72px 146px 72px;
+      gap: 8px;
+    }
+
+    .op-cell,
+    .op-result {
+      border: 1px solid var(--line);
+      padding: 6px 8px;
+      text-align: center;
+      background: var(--fill);
+    }
+
+    .op-result {
+      margin-top: 6px;
+      min-height: 31px;
+      visibility: hidden;
+      background: var(--fill);
+    }
+
+    .op-cell.grey {
+      opacity: 0.35;
+      background: #eee;
+    }
+
+    .op-result.on {
+      visibility: visible;
+      background: var(--index);
+      border-color: #80a8e8;
+    }
+
+    #decoded {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      width: 386px;
+      max-width: 100%;
+    }
+
+    .temp {
+      min-width: 0;
+      border: 1px solid var(--line);
+      padding: 10px;
+      min-height: 72px;
+      background: var(--fill);
+    }
+
+    .temp.hot {
+      background: var(--hot);
+      border-color: #d6a400;
+    }
+
+    .temp strong,
+    .row code,
+    .expr code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .temp strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .value {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .tables {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
+
+    .table-wrap {
+      display: grid;
+      gap: 4px;
+    }
+
+    .table-size {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: var(--fill);
+    }
+
+    .table-wrap.lookup {
+      outline: 3px solid #777;
+      outline-offset: 4px;
+    }
+
+    caption {
+      padding-bottom: 6px;
+      text-align: left;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      height: 30px;
+      padding: 4px 7px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th { background: #f1f1f1; font-weight: 600; }
+    td { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    th:first-child,
+    td:first-child {
+      background: #eee;
+    }
+    tr.hot td:first-child {
+      background: var(--hot);
+    }
+    .ellipsis td { color: var(--muted); text-align: center; }
+
+    .controls {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    button {
+      min-width: 46px;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      background: var(--fill);
+      color: var(--fg);
+      cursor: pointer;
+      font-size: 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    button:disabled {
+      color: #aaa;
+      cursor: default;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 6px;
+      accent-color: #888;
+    }
+
+    .step-name {
+      margin-top: 18px;
+      margin-bottom: 8px;
+      margin-left: 16px;
+      color: var(--fg);
+      font-size: 15px;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    @media (max-width: 900px) {
+      .stage { grid-template-columns: 1fr; }
+      .tables { grid-template-columns: 1fr; }
+      .payload { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="stage">
+      <div class="panel">
+        <p class="label">payload</p>
+        <div class="payload" id="payload">
+          <div class="box" data-payload="bit7"><span class="bits">1 bit</span>1</div>
+          <div class="box" data-payload="bit6"><span class="bits">1 bit</span>1</div>
+          <div class="box wide" data-payload="bits5-1"><span class="bits">5 bits</span>0x13</div>
+          <div class="box" data-payload="bit0"><span class="bits">1 bit</span>1</div>
+        </div>
+
+        <div class="op-viz" aria-hidden="true">
+          <div class="op-row">
+            <div class="op-cell" data-bit="bit7">bit 7</div>
+            <div class="op-cell" data-bit="bit6">bit 6</div>
+            <div class="op-cell" data-bit="bits5-1">bits 5-1</div>
+            <div class="op-cell" data-bit="bit0">bit 0</div>
+          </div>
+          <div class="op-under">
+            <div class="op-result" id="opResult"></div>
+          </div>
+        </div>
+
+        <div id="decoded"></div>
+      </div>
+
+      <div class="tables">
+        <div class="table-wrap" data-table="t0">
+          <table>
+            <caption>T0, sign-minor</caption>
+            <thead><tr><th>index</th><th>value</th></tr></thead>
+            <tbody>
+              <tr><td>...</td><td>...</td></tr>
+              <tr data-row="t0-pos"><td>0x26</td><td class="pos">+42</td></tr>
+              <tr data-row="t0-neg"><td>0x27</td><td class="neg">-42</td></tr>
+              <tr><td>...</td><td>...</td></tr>
+            </tbody>
+          </table>
+          <div class="table-size">64 x INT8</div>
+        </div>
+
+        <div class="table-wrap" data-table="t1">
+          <table>
+            <caption>T1, sign-major</caption>
+            <thead><tr><th>index</th><th>value</th></tr></thead>
+            <tbody>
+              <tr><td>...</td><td>...</td></tr>
+              <tr data-row="t1-pos"><td>0x13</td><td class="pos">+17</td></tr>
+              <tr><td>...</td><td>...</td></tr>
+              <tr data-row="t1-neg"><td>0x33</td><td class="neg">-17</td></tr>
+              <tr><td>...</td><td>...</td></tr>
+            </tbody>
+          </table>
+          <div class="table-size">64 x INT8</div>
+        </div>
+
+        <div class="table-wrap" data-table="t2">
+          <table>
+            <caption>T2, sign-minor</caption>
+            <thead><tr><th>index</th><th>value</th></tr></thead>
+            <tbody>
+              <tr><td>...</td><td>...</td></tr>
+              <tr data-row="t2-pos"><td>0x26</td><td class="pos">+93</td></tr>
+              <tr data-row="t2-neg"><td>0x27</td><td class="neg">-93</td></tr>
+              <tr><td>...</td><td>...</td></tr>
+            </tbody>
+          </table>
+          <div class="table-size">64 x INT8</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="step-name" id="stepName"></div>
+    <div class="controls">
+      <button id="play" type="button" aria-label="Play">&#9654;</button>
+      <button id="back" type="button" aria-label="Previous frame">&lt;</button>
+      <input id="progress" type="range" min="0" max="6" value="0" step="1" aria-label="Frame progress">
+      <button id="forward" type="button" aria-label="Next frame">&gt;</button>
+    </div>
+  </main>
+
+  <script>
+    const frames = [
+      {
+        name: "0/8: starting state",
+        text: "payload = [1] [1] [0x13] [1]",
+        decoded: {}
+      },
+      {
+        name: "1/8: mask I0",
+        text: "I0 = pack & 0x3f = 0x27",
+        panel: true,
+        op: {
+          grey: ["bit7", "bit6"],
+          payloadGrey: ["bit7", "bit6"],
+          result: ["3 / 5", "I0 = 0x27"]
+        },
+        decoded: {}
+      },
+      {
+        name: "2/8: lookup V0",
+        text: "V0 = T0[I0] = T0[0x27]",
+        rows: ["t0-neg"],
+        table: "t0",
+        values: ["V0"],
+        op: {
+          grey: ["bit7", "bit6"],
+          payloadGrey: ["bit7", "bit6"],
+          result: ["3 / 5", "I0 = 0x27"]
+        },
+        decoded: { V0: "-42" }
+      },
+      {
+        name: "3-4/8: shift and mask for I1",
+        text: "I1 = (pack >> 1) & 0x3f = 0x33",
+        panel: true,
+        op: {
+          grey: ["bit7", "bit0"],
+          payloadGrey: ["bit7", "bit0"],
+          result: ["2 / 4", "I1 = 0x33"]
+        },
+        decoded: { V0: "-42" }
+      },
+      {
+        name: "5/8: lookup V1",
+        text: "V1 = T1[I1] = T1[0x33]",
+        rows: ["t1-neg"],
+        table: "t1",
+        values: ["V1"],
+        op: {
+          grey: ["bit7", "bit0"],
+          payloadGrey: ["bit7", "bit0"],
+          result: ["2 / 4", "I1 = 0x33"]
+        },
+        decoded: { V0: "-42", V1: "-17" }
+      },
+      {
+        name: "6-7/8: shift and EOR for I2",
+        text: "I2 = I0 ^ (pack >> 7) = 0x26",
+        panel: true,
+        op: {
+          grey: ["bit6"],
+          payloadGrey: ["bit6"],
+          result: ["1 / 5", "I2 = (X >> 7) EOR I0 = 0x26"]
+        },
+        decoded: { V0: "-42", V1: "-17" }
+      },
+      {
+        name: "8/8: lookup V2",
+        text: "V2 = T2[I2] = T2[0x26]",
+        rows: ["t2-pos"],
+        table: "t2",
+        values: ["V2"],
+        op: {
+          grey: ["bit6"],
+          payloadGrey: ["bit6"],
+          result: ["1 / 5", "I2 = 0x26"]
+        },
+        decoded: { V0: "-42", V1: "-17", V2: "+93" }
+      }
+    ];
+
+    const progress = document.querySelector("#progress");
+    const play = document.querySelector("#play");
+    const back = document.querySelector("#back");
+    const forward = document.querySelector("#forward");
+    const stepName = document.querySelector("#stepName");
+    const panel = document.querySelector(".panel");
+    const decoded = document.querySelector("#decoded");
+    const opResult = document.querySelector("#opResult");
+
+    let frame = 0;
+    let timer = null;
+
+    function clearHighlights() {
+      document.querySelectorAll(".hot,.lookup,.payload-masked").forEach((el) => {
+        el.classList.remove("hot", "lookup", "payload-masked");
+      });
+    }
+
+    function pause() {
+      clearInterval(timer);
+      timer = null;
+      play.textContent = "\u25b6";
+      play.setAttribute("aria-label", "Play");
+    }
+
+    function render() {
+      const f = frames[frame];
+      clearHighlights();
+      panel.classList.toggle("lookup", Boolean(f.panel));
+      document.querySelectorAll(".op-cell").forEach((el) => el.classList.remove("grey"));
+      opResult.classList.remove("on");
+      opResult.textContent = "";
+      opResult.style.gridColumn = "1 / 2";
+
+      if (f.op) {
+        for (const bit of f.op.grey || []) {
+          document.querySelector(`[data-bit="${bit}"]`).classList.add("grey");
+        }
+        for (const bit of f.op.payloadGrey || []) {
+          document.querySelector(`[data-payload="${bit}"]`).classList.add("payload-masked");
+        }
+        if (f.op.result) {
+          opResult.style.gridColumn = f.op.result[0];
+          opResult.textContent = f.op.result[1];
+          opResult.classList.add("on");
+        }
+      }
+
+      decoded.innerHTML = "";
+      for (const name of ["V0", "V1", "V2"]) {
+        const card = document.createElement("div");
+        card.className = "temp";
+        if ((f.values || []).includes(name)) {
+          card.classList.add("hot");
+        }
+        card.innerHTML = `<strong>${name}</strong><span class="value">${f.decoded[name] || ""}</span>`;
+        decoded.appendChild(card);
+      }
+
+      for (const key of f.rows || []) {
+        document.querySelector(`[data-row="${key}"]`).classList.add("hot");
+      }
+      if (f.table) {
+        document.querySelector(`[data-table="${f.table}"]`).classList.add("lookup");
+      }
+
+      stepName.textContent = f.name;
+      progress.value = frame;
+      progress.max = frames.length - 1;
+      back.disabled = frame === 0;
+      forward.textContent = frame === frames.length - 1 ? "\u21ba" : ">";
+      forward.setAttribute(
+        "aria-label",
+        frame === frames.length - 1 ? "Reset animation" : "Next frame"
+      );
+    }
+
+    play.addEventListener("click", () => {
+      if (timer) {
+        pause();
+        return;
+      }
+      play.textContent = "\u25a0";
+      play.setAttribute("aria-label", "Pause");
+      timer = setInterval(() => {
+        frame = frame === frames.length - 1 ? 0 : frame + 1;
+        render();
+      }, 3000);
+    });
+
+    back.addEventListener("click", () => {
+      pause();
+      frame = Math.max(0, frame - 1);
+      render();
+    });
+
+    forward.addEventListener("click", () => {
+      pause();
+      frame = frame === frames.length - 1 ? 0 : frame + 1;
+      render();
+    });
+
+    progress.addEventListener("input", () => {
+      pause();
+      frame = Number(progress.value);
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
