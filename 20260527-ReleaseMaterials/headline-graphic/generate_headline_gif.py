@@ -1,3 +1,11 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "Pillow>=11,<13",
+# ]
+# ///
+
 from __future__ import annotations
 
 import subprocess
@@ -11,6 +19,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 VIDEO = SCRIPT_DIR / "demo.mp4"
 DEQUANT_ASM = SCRIPT_DIR / "dequant.s"
 OUTPUT = SCRIPT_DIR / "headline.gif"
+STATIC_OUTPUT = SCRIPT_DIR / "headline-static.png"
 
 WIDTH = 1200
 HEIGHT = 630
@@ -256,6 +265,10 @@ with tempfile.TemporaryDirectory(prefix="llama-mobile-headline-") as tmp_name:
             frame.paste(video_frame, screen_box[:2], screen_mask)
             frame.save(tmp / f"frame-{index:03d}.png")
 
+    frame.resize(
+        (WIDTH * 2, HEIGHT * 2), Image.Resampling.LANCZOS
+    ).save(STATIC_OUTPUT)
+
     subprocess.run(
         [
             "ffmpeg",
@@ -281,3 +294,4 @@ with tempfile.TemporaryDirectory(prefix="llama-mobile-headline-") as tmp_name:
     )
 
 print(OUTPUT)
+print(STATIC_OUTPUT)
