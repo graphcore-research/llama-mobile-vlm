@@ -1,6 +1,6 @@
 # Llama-Mobile
 
-Code and release artifacts for **Llama-Mobile: Efficient 2.7-Bit Quantization of VLMs**.
+Code and release artifacts for [Llama-Mobile: Efficient 2.7-Bit Quantization of VLMs](https://arxiv.org/abs/2608.21134).
 
 Including:
 
