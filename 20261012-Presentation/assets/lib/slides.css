@@ -1,0 +1,87 @@
+/* General styles */
+@font-face { font-family: 'Graphik'; src: url('../fonts/Graphik-Regular-Web.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Graphik'; src: url('../fonts/Graphik-Medium-Web.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+:root { font-family: 'Graphik', Arial, Helvetica, sans-serif; color: #252530; background: white; }
+.reveal { font-family: inherit; font-size: 24px; line-height: 1.25; }
+.reveal .slides { text-align: left; }
+.reveal .slides section { box-sizing: border-box; padding: 8px 40px 32px; }
+.reveal .slides section:has(.footnote) { min-height: var(--slide-height); padding-bottom: 78px; }
+.reveal .slides .footnote { position: absolute; bottom: 8px; left: 40px; right: 40px; margin: 0; font-size: 16px; line-height: 1.35; color: #62626d; }
+p { margin-block-start: 0; margin-block-end: 30px; }
+li { margin-bottom: 30px; }
+h1, h2 { font-family: inherit; }
+h1 { margin: 0 0 12px; padding-bottom: 40px; font-size: 44px; font-weight: 400; letter-spacing: -1px; }
+h2 { margin: 0 0 8px; font-size: 23px; font-weight: 500; }
+strong, b { font-weight: 500; }
+.subtitle { margin: 0; color: #62626d; font-size: 22px; }
+a { color: #a6324a; text-decoration: none; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.reveal code { font-size: 0.94em; }
+.reveal pre { font-size: 0.84em; }
+.reveal pre code .token-comment { color: #777783 !important; font-style: italic; }
+.reveal pre code .token-string { color: #26713f !important; }
+.reveal pre code .token-number, .reveal pre code .token-literal { color: #a45d24 !important; }
+.reveal pre code .token-keyword { color: #8b2863 !important; font-weight: 500; }
+.reveal pre code .token-type { color: #126276 !important; }
+.reveal pre code .token-function { color: #1d55a1 !important; }
+.reveal pre code .token-operator { color: #62626d !important; }
+
+/** Slide: Title **/
+.title-slide h1 { font-size: 82px; letter-spacing: -2.5px; margin: 160px 0 16px 84px; }
+.title-subtitle { margin: 0 0 0 84px; font-size: 34px; color: #52515c; }
+.title-authors { display: flex; gap: 64px; margin: 32px 0 0 84px; font-size: 24px; color: #252530; }
+.title-affiliation { display: block; margin-top: 8px; font-size: 18px; color: #62626d; }
+.title-contact { display: block; margin-top: 8px; font-size: 20px; color: #62626d; }
+.title-slide .title-contact a { color: inherit; }
+.title-slide .title-contact a:hover { color: #a6324a; text-decoration: underline; }
+.title-slide .title-paper { margin: 40px 0 0 84px; font-size: 20px; }
+
+/** Slide: Headline **/
+.headline-slide .headline-content { display: grid; grid-template-columns: 1fr 234px; align-items: start; gap: 48px; margin-top: 8px; }
+.headline-slide .headline-copy ul { margin-top: 0; }
+.headline-slide video { display: block; width: 234px; height: 520px; object-fit: contain; }
+
+/** Reusable left/right panel layout **/
+.left-right-panels { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.9fr); align-items: start; gap: 32px; }
+.left-panel { min-width: 0; }
+.right-panel { min-width: 0; padding: 0 16px 16px; border-radius: 8px; }
+.right-panel img { display: block; width: 100%; height: 178px; object-fit: contain; background: white; border-radius: 4px; }
+.right-panel img.tradeoff-image { height: 340px; }
+.right-panel figure { margin: 0; }
+.reveal figcaption { margin-top: 12px; font-size: 18px; font-style: normal; color: #52525c; line-height: 1.35; }
+
+/** S3D8 terminology colours from the blog **/
+.s3d8-highlight { border-radius: 0.18em; box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0.02em 0.18em; }
+strong.s3d8-highlight { color: #333; }
+.s3d8-channel-scales { background-color: #DAE8FC; border-bottom: 0.08em solid #6C8EBF; }
+.s3d8-sign-bits { background-color: #D5E8D4; border-bottom: 0.08em solid #82B366; }
+.s3d8-centroid-indices { background-color: #FFE6CC; border-bottom: 0.08em solid #D79B00; }
+.s3d8-abs-centroids { background-color: #F8CECC; border-bottom: 0.08em solid #B85450; }
+
+/** Slide: Centroids view **/
+.centroid-slide button, .centroid-slide .toolbar a { border: 1px solid #d7d7dd; border-radius: 5px; background: white; padding: 8px 12px; color: #454550; font: inherit; cursor: pointer; }
+.centroid-slide button[aria-pressed="true"] { background: #ffedf1; border-color: #cb5c71; color: #a6324a; }
+.centroid-slide .toolbar { display: flex; align-items: center; gap: 16px; margin: 24px 0 20px; font-size: 17px; }
+.centroid-slide #distributions { display: flex; gap: 6px; }
+.centroid-slide #reset { margin-left: auto; }
+.centroid-slide .plots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 32px; }
+.centroid-slide .description { margin: 0 0 10px; font-size: 16px; color: #62626d; }
+
+/* The original widget injects its CSS. These overrides keep it slide-sized. */
+.reveal .centroid-slide .centroid-cloud { margin: 0; padding: 0; border: 0; background: transparent; }
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-controls,
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-legend,
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-help { display: none; }
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-meta { font-size: 16px; gap: 12px; margin-bottom: 10px; }
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-stage { height: 370px; border-radius: 6px; }
+.reveal .centroid-slide .centroid-cloud .s3d8-cloud-tooltip { font-size: 14px; }
+
+/* PDF and print styles */
+html.print-pdf .reveal .slides section:has(.footnote) { min-height: var(--slide-height); }
+.centroid-slide .print-distribution { display: none; }
+html.print-pdf .centroid-slide .toolbar { display: none; }
+html.print-pdf .centroid-slide .print-distribution { display: block; font-size: 17px; margin: 24px 0 20px; }
+@media print {
+  .centroid-slide .toolbar { display: none; }
+  .centroid-slide .print-distribution { display: block; font-size: 17px; margin: 24px 0 20px; }
+}

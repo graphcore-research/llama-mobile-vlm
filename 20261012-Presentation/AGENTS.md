@@ -1,0 +1,2 @@
+- see .local/paper.pdf for context
+- see https://graphcore-research.github.io/2026-08-24-llama-mobile/ for context
