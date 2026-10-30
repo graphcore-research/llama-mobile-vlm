@@ -357,9 +357,7 @@ It worked! 😅 We fit an **11B-parameter VLM on a phone** using S3D8 and self-d
  - **Vector formats** with kernel–format codesign give compact weights and fast decoding via SIMD register-based lookups.
  - **QAT needs care**, as synthetic data can steer the model away from its instruction-tuned behaviour.
 
-<p style="margin-top: 100px;"><strong>Questions are most welcome!</strong></p>
-
-<p style="margin-top: 60px;">📣 Graphcore Research news: <strong>2027 internships opening soon</strong>!</p>
+<p style="margin-top: 100px;"><strong>Questions welcome!</strong></p>
 
 </div>
 <div class="right-panel">
