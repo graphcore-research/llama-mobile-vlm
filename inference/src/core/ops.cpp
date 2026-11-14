@@ -277,8 +277,17 @@ void _mv_chunk_bf16(const __bf16* __restrict__ a,
 
 float _dot_bf16(const bf16* __restrict__ a, const bf16* __restrict__ b, const uint dK) {
     bf16 result;
-    _mv_chunk_bf16<1, 64>(reinterpret_cast<const __bf16*>(a), reinterpret_cast<const __bf16*>(b),
-                          dK, reinterpret_cast<__bf16*>(&result));
+    auto a_ = reinterpret_cast<const __bf16*>(a);
+    auto b_ = reinterpret_cast<const __bf16*>(b);
+    auto out_ = reinterpret_cast<__bf16*>(&result);
+    // Pick a block that divides dK, so no elements fall into the scalar tail (e.g. dK=80)
+    if (dK % 64 == 0) {
+        _mv_chunk_bf16<1, 64>(a_, b_, dK, out_);
+    } else if (dK % 16 == 0) {
+        _mv_chunk_bf16<1, 16>(a_, b_, dK, out_);
+    } else {
+        _mv_chunk_bf16<1, 8>(a_, b_, dK, out_);
+    }
     return float(result);
 }
 
@@ -1214,9 +1223,12 @@ void attentionInPlace(bf16* __restrict__ queryOut,
             softmaxInPlace(scores.get(), 1u, dSkv_row);
             // s @ v
             std::fill_n(outTmp.get(), dim, 0.0f);
+            float* __restrict__ out = outTmp.get();
             for (auto sKv = 0u; sKv < dSkv_row; ++sKv) {
+                const float score = scores[sKv];
+                const bf16* __restrict__ v = &value[sKv * (dHkv * dim) + hKv * (dim)];
                 for (auto i = 0u; i < dim; ++i) {
-                    outTmp[i] += scores[sKv] * float(value[sKv * (dHkv * dim) + hKv * (dim) + i]);
+                    out[i] += score * float(v[i]);
                 }
             }
             for (auto i = 0u; i < dim; ++i) {
