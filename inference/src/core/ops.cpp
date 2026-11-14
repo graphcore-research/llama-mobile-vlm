@@ -1070,12 +1070,14 @@ void gather(const uint8_t* __restrict__ weight,
 // Maths/NN ops
 
 void addInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, const uint n) {
+#pragma omp parallel for
     for (auto i = 0u; i < n; ++i) {
         x[i] = bf16(float(x[i]) + float(y[i]));
     }
 }
 
 void broadcastAddInPlace(bf16* __restrict__ x, const bf16* __restrict__ y, uint n, uint d) {
+#pragma omp parallel for
     for (auto i = 0u; i < n; ++i) {
         for (auto j = 0u; j < d; ++j) {
             auto idx = i * d + j;
@@ -1088,6 +1090,7 @@ void geluInPlace(bf16* x, uint n) {
     // As per torch's 'approximate' GELU
     const float c0 = std::sqrt(2.0f / std::numbers::pi_v<float>);
     const float c1 = 0.044715f;
+#pragma omp parallel for
     for (auto i = 0u; i < n; ++i) {
         float xi = float(x[i]);
         float z = std::tanh(c0 * (xi + c1 * xi * xi * xi));
@@ -1096,6 +1099,7 @@ void geluInPlace(bf16* x, uint n) {
 }
 
 void swiGluInPlace(bf16* __restrict__ x, const bf16* __restrict__ gate, const uint n) {
+#pragma omp parallel for
     for (auto i = 0u; i < n; ++i) {
         auto gi = float(gate[i]);
         x[i] = bf16(float(x[i]) * gi / (1 + std::exp(-gi)));
@@ -1108,6 +1112,7 @@ void rmsNorm(const bf16* __restrict__ weight,
              const uint dim,
              float epsilon,
              bf16* __restrict__ out) {
+#pragma omp parallel for
     for (auto n = 0u; n < batch; ++n) {
         auto xn = x + n * dim;
         float sumSq = 0;
@@ -1129,6 +1134,7 @@ void layerNorm(const bf16* __restrict__ weight,
                uint dim,
                float epsilon,
                bf16* __restrict__ out) {
+#pragma omp parallel for
     for (auto n = 0u; n < batch; ++n) {
         auto xn = x + n * dim;
         float sum = 0, sumSq = 0;
@@ -1152,6 +1158,7 @@ void rotateInPlace(bf16* __restrict__ x,
                    const uint dS,
                    const uint dH,
                    const uint dim) {
+#pragma omp parallel for
     for (auto s = 0u; s < dS; ++s) {
         for (auto h = 0u; h < dH; ++h) {
             for (auto i = 0u; i < dim / 2; ++i) {
